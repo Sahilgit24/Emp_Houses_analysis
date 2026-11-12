@@ -1,0 +1,156 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {combineNormalizedBeatData, normalizeBeatApiPayload} from "../src/data/beatApiData.js";
+
+const sample = {
+    BeatWiseReport: {
+        BeatUserId: 7,
+        FromDate: "2026-10-14T00:00:00+05:30",
+        ToDate: "2026-10-16T00:00:00+05:30",
+        TotalHouses: 3,
+        ScannedHouses: [
+            {
+                HouseId: "H1",
+                ReferanceId: "R1",
+                Lat: 21.01,
+                Lon: 75.01,
+                Scanned: true,
+                ScannerUserId: 7,
+                ScannerName: "Assigned worker",
+                ScanningDate: "2026-10-16T09:00:00+05:30",
+            },
+            {
+                HouseId: "H2",
+                ReferanceId: "R2",
+                Lat: 21.02,
+                Lon: 75.02,
+                Scanned: true,
+                ScannerUserId: 8,
+                ScannerName: "Other worker",
+                ScanningDate: "2026-10-16T09:30:00+05:30",
+            },
+        ],
+        NotScannedHouses: [
+            {
+                HouseId: "H3",
+                ReferanceId: "R3",
+                Lat: 21.03,
+                Lon: 75.03,
+                Scanned: false,
+                ScannerUserId: null,
+                ScannerName: null,
+                ScanningDate: null,
+            },
+        ],
+    },
+    RouteDetails: {
+        geofence: "21,75;21,76;22,76",
+        houses: [{lat: 21.01, lon: 75.01}, {lat: 21.03, lon: 75.03}],
+        dumpyards: [],
+        routes: [
+            {
+                date: "2026-10-15",
+                emproute: [{datetime: "2026-10-15T08:00:00", lat: 21.01, lon: 75.01}],
+                Collectionlist: [{referanceId: "R1", datetime: "2026-10-15T09:00:00+05:30", lat: 21.01, lon: 75.01}],
+                dumplist: [],
+            },
+            {
+                date: "2026-10-16",
+                emproute: [
+                    {datetime: "2026-10-16T08:00:00", lat: 21.01, lon: 75.01},
+                    {datetime: "2026-10-16T08:10:00", lat: 21.02, lon: 75.02},
+                ],
+                Collectionlist: [{referanceId: "R1", datetime: "2026-10-16T09:00:00+05:30", lat: 21.01, lon: 75.01}],
+                dumplist: [],
+            },
+        ],
+    },
+};
+
+test("normalizes owner, other-employee, and remaining houses with stable IDs", () => {
+    const [beat] = normalizeBeatApiPayload(sample).beats;
+    assert.deepEqual(beat.classificationCounts, {own: 1, other: 1, remaining: 1});
+    assert.equal(beat.houses[0].houseId, "H1");
+    assert.equal(beat.houses[0].collectionStatus, "own");
+    assert.equal(beat.houses[1].collectionStatus, "other");
+    assert.equal(beat.houses[2].collectionStatus, "remaining");
+    assert.equal(beat.houses[0].isRouteHouse, true);
+    assert.equal(beat.houses[1].isRouteHouse, false);
+});
+
+test("links route collection history by reference ID and computes intervals", () => {
+    const [beat] = normalizeBeatApiPayload(sample).beats;
+    const house = beat.houses.find((item) => item.houseId === "H1");
+    assert.deepEqual(house.history.collectionDates, ["2026-10-15", "2026-10-16"]);
+    assert.equal(house.history.collectionCount, 2);
+    assert.equal(house.history.typicalIntervalDays, 1);
+    assert.equal(house.history.currentGapDays, 0);
+    assert.equal(beat.routes[1].collectionScans[0].houseId, "H1");
+    assert.ok(beat.routes[1].distanceKm > 0);
+});
+
+test("normalizes dump weight measurements from route records", () => {
+    const withDumpWeight = structuredClone(sample);
+    withDumpWeight.RouteDetails.routes[1].dumplist = [{
+        referanceId: "D1",
+        datetime: "2026-10-16T10:00:00+05:30",
+        totalGcWeight: "125.5",
+        totalWetWeight: 80,
+        totalDryWeight: 45.5,
+    }];
+
+    const [beat] = normalizeBeatApiPayload(withDumpWeight).beats;
+    assert.deepEqual(beat.routes[1].dumpEvents[0], {
+        referenceId: "D1",
+        datetime: "2026-10-16T10:00:00+05:30",
+        lat: null,
+        lon: null,
+        totalGcWeight: 125.5,
+        totalWetWeight: 80,
+        totalDryWeight: 45.5,
+        weightUnit: null,
+        raw: withDumpWeight.RouteDetails.routes[1].dumplist[0],
+    });
+});
+
+test("keeps route-linked history for houses listed as unscanned", () => {
+    const withRouteHistory = structuredClone(sample);
+    withRouteHistory.RouteDetails.routes[0].Collectionlist.push({
+        referanceId: "R3",
+        datetime: "2026-10-15T10:00:00+05:30",
+    });
+
+    const [beat] = normalizeBeatApiPayload(withRouteHistory).beats;
+    const house = beat.houses.find((item) => item.houseId === "H3");
+    assert.equal(house.collectionStatus, "remaining");
+    assert.deepEqual(house.history.collectionDates, ["2026-10-15"]);
+    assert.equal(house.history.collectionCount, 1);
+});
+
+test("rejects duplicate HouseIds instead of using row position as an identity", () => {
+    const invalid = structuredClone(sample);
+    invalid.BeatWiseReport.NotScannedHouses[0].HouseId = "H1";
+    assert.throws(() => normalizeBeatApiPayload(invalid), /duplicate HouseId/);
+});
+
+test("combines separate files with distinct Beat IDs", () => {
+    const secondFile = structuredClone(sample);
+    secondFile.BeatWiseReport.BeatUserId = 8;
+    const combined = combineNormalizedBeatData([
+        normalizeBeatApiPayload(sample, "first.json"),
+        normalizeBeatApiPayload(secondFile, "second.json"),
+    ]);
+
+    assert.deepEqual(combined.beats.map((beat) => beat.id), ["beat-user:7", "beat-user:8"]);
+    assert.equal(combined.sourceName, "first.json, second.json");
+});
+
+test("rejects duplicate Beat IDs across files with both filenames", () => {
+    assert.throws(
+        () => combineNormalizedBeatData([
+            normalizeBeatApiPayload(sample, "first.json"),
+            normalizeBeatApiPayload(sample, "second.json"),
+        ]),
+        /Beat ID "beat-user:7" appears in both "first.json" and "second.json"/,
+    );
+});

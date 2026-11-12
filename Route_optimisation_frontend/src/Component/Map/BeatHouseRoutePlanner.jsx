@@ -2,6 +2,7 @@ import React, {useMemo, useRef, useState} from "react";
 import L from "leaflet";
 import {CircleMarker, MapContainer, Marker, Polygon, Polyline, Popup, TileLayer, useMap} from "react-leaflet";
 import {API_URL} from "@/config.js";
+import {isInsidePolygon} from "@/data/routeBeatData.js";
 
 const startIcon = L.divIcon({
     className: "",
@@ -27,6 +28,16 @@ const playbackVehicleIcon = L.divIcon({
     iconSize: [32, 32],
     iconAnchor: [16, 24],
 });
+const ALL_EMPLOYEES = "__all_employees__";
+const EMPLOYEE_ROUTE_COLORS = [
+    "#2563eb", "#ea580c", "#9333ea", "#0891b2", "#16a34a", "#db2777",
+    "#ca8a04", "#4f46e5", "#0f766e", "#c026d3", "#be123c", "#475569",
+];
+const HOUSE_STATUS_STYLES = {
+    own: {label: "Collected by assigned employee", stroke: "#15803d", fill: "#4ade80"},
+    other: {label: "Collected by another employee", stroke: "#b45309", fill: "#fbbf24"},
+    remaining: {label: "No collection recorded", stroke: "#b91c1c", fill: "#f87171"},
+};
 
 function getRoutePosition(routePath, progress) {
     if (!routePath?.length) return null;
@@ -66,205 +77,92 @@ function getRoutePosition(routePath, progress) {
 function distanceFromRouteMeters(point, routePath) {
     if (!routePath?.length) return null;
     let minimum = Infinity;
-    const metersPerDegree = 111320;
-    const cosLatitude = Math.cos(point.lat * Math.PI / 180);
     for (let index = 0; index < routePath.length; index += 1) {
         const from = routePath[index];
         const to = routePath[Math.min(index + 1, routePath.length - 1)];
-        const fromX = (from.lon - point.lon) * metersPerDegree * cosLatitude;
-        const fromY = (from.lat - point.lat) * metersPerDegree;
-        const toX = (to.lon - point.lon) * metersPerDegree * cosLatitude;
-        const toY = (to.lat - point.lat) * metersPerDegree;
-        const dx = toX - fromX;
-        const dy = toY - fromY;
-        const lengthSquared = dx * dx + dy * dy;
-        const fraction = lengthSquared === 0
-            ? 0
-            : Math.max(0, Math.min(1, -(fromX * dx + fromY * dy) / lengthSquared));
-        minimum = Math.min(minimum, Math.hypot(fromX + fraction * dx, fromY + fraction * dy));
+        minimum = Math.min(minimum, distanceFromRouteSegmentMeters(point, from, to));
     }
     return minimum;
 }
 
-function isInsidePolygon(point, polygon) {
-    let inside = false;
-    const x = point.lon;
-    const y = point.lat;
-    for (let index = 0, previous = polygon.length - 1; index < polygon.length; previous = index, index += 1) {
-        const currentPoint = polygon[index];
-        const previousPoint = polygon[previous];
-        const cross = (x - previousPoint[1]) * (currentPoint[0] - previousPoint[0]) -
-            (y - previousPoint[0]) * (currentPoint[1] - previousPoint[1]);
-        if (Math.abs(cross) < 1e-10 &&
-            x >= Math.min(previousPoint[1], currentPoint[1]) && x <= Math.max(previousPoint[1], currentPoint[1]) &&
-            y >= Math.min(previousPoint[0], currentPoint[0]) && y <= Math.max(previousPoint[0], currentPoint[0])) {
-            return true;
-        }
-        const crosses = ((currentPoint[0] > y) !== (previousPoint[0] > y)) &&
-            (x < (previousPoint[1] - currentPoint[1]) * (y - currentPoint[0]) /
-                (previousPoint[0] - currentPoint[0]) + currentPoint[1]);
-        if (crosses) inside = !inside;
-    }
-    return inside;
+function distanceFromRouteSegmentMeters(point, from, to) {
+    const metersPerDegree = 111320;
+    const cosLatitude = Math.cos(point.lat * Math.PI / 180);
+    const fromX = (from.lon - point.lon) * metersPerDegree * cosLatitude;
+    const fromY = (from.lat - point.lat) * metersPerDegree;
+    const toX = (to.lon - point.lon) * metersPerDegree * cosLatitude;
+    const toY = (to.lat - point.lat) * metersPerDegree;
+    const dx = toX - fromX;
+    const dy = toY - fromY;
+    const lengthSquared = dx * dx + dy * dy;
+    const fraction = lengthSquared === 0
+        ? 0
+        : Math.max(0, Math.min(1, -(fromX * dx + fromY * dy) / lengthSquared));
+    return Math.hypot(fromX + fraction * dx, fromY + fraction * dy);
 }
 
-function parseVehicleFile(fileName, data) {
-    if (!Array.isArray(data)) {
-        throw new Error(`${fileName} must contain a JSON array of dated vehicle routes.`);
+function createRouteSegmentIndex(routePath, maximumDistanceMeters) {
+    if (!routePath?.length) return null;
+    const origin = routePath[Math.floor(routePath.length / 2)];
+    const metersPerDegree = 111320;
+    const longitudeScale = metersPerDegree * Math.cos(origin.lat * Math.PI / 180);
+    const cellSize = Math.max(100, maximumDistanceMeters * 2);
+    const padding = maximumDistanceMeters + cellSize;
+    const cells = new Map();
+    const globalSegments = [];
+    const segments = routePath.length === 1
+        ? [{from: routePath[0], to: routePath[0]}]
+        : routePath.slice(1).map((to, index) => ({from: routePath[index], to}));
+
+    const project = (point) => ({
+        x: (point.lon - origin.lon) * longitudeScale,
+        y: (point.lat - origin.lat) * metersPerDegree,
+    });
+    const cellKey = (x, y) => `${x}:${y}`;
+    for (const segment of segments) {
+        const from = project(segment.from);
+        const to = project(segment.to);
+        const minX = Math.floor((Math.min(from.x, to.x) - padding) / cellSize);
+        const maxX = Math.floor((Math.max(from.x, to.x) + padding) / cellSize);
+        const minY = Math.floor((Math.min(from.y, to.y) - padding) / cellSize);
+        const maxY = Math.floor((Math.max(from.y, to.y) + padding) / cellSize);
+        if ((maxX - minX + 1) * (maxY - minY + 1) > 256) {
+            globalSegments.push(segment);
+            continue;
+        }
+        for (let x = minX; x <= maxX; x += 1) {
+            for (let y = minY; y <= maxY; y += 1) {
+                const key = cellKey(x, y);
+                const nearby = cells.get(key) || [];
+                nearby.push(segment);
+                cells.set(key, nearby);
+            }
+        }
     }
 
-    return data.map((record, dayIndex) => {
-        if (!record?.date || !Array.isArray(record.emproute)) {
-            throw new Error(`${fileName} has an invalid record at item ${dayIndex + 1}.`);
-        }
-        const trackPoints = record.emproute.map((point, pointIndex) => {
-            const lat = Number(point?.lat);
-            const lon = Number(point?.lon);
-            const timestamp = Date.parse(point?.datetime);
-            if (point?.lat == null || String(point.lat).trim() === "" || point?.lon == null || String(point.lon).trim() === "" ||
-                !Number.isFinite(lat) || Math.abs(lat) > 90 || !Number.isFinite(lon) || Math.abs(lon) > 180 || !Number.isFinite(timestamp)) {
-                throw new Error(`${fileName} has an invalid GPS coordinate or timestamp on ${record.date} (point ${pointIndex + 1}).`);
-            }
-            return {lat, lon, timestamp, datetime: point.datetime};
-        }).sort((a, b) => a.timestamp - b.timestamp);
-        const collectionList = record.Collectionlist ?? record.collectionList ?? [];
-        if (!Array.isArray(collectionList)) {
-            throw new Error(`${fileName} has an invalid Collectionlist on ${record.date}.`);
-        }
-        const collectionScans = collectionList.map((collection, collectionIndex) => {
-            const plateId = collection?.referanceId ?? collection?.referenceId;
-            const hasLat = collection?.lat != null && String(collection.lat).trim() !== "";
-            const hasLon = collection?.lon != null && String(collection.lon).trim() !== "";
-            let lat = null;
-            let lon = null;
-            if (hasLat !== hasLon) {
-                throw new Error(`${fileName} has an incomplete collection coordinate on ${record.date} (item ${collectionIndex + 1}).`);
-            }
-            if (hasLat) {
-                lat = Number(collection.lat);
-                lon = Number(collection.lon);
-                if (!Number.isFinite(lat) || Math.abs(lat) > 90 || !Number.isFinite(lon) || Math.abs(lon) > 180) {
-                    throw new Error(`${fileName} has an invalid collection coordinate on ${record.date} (item ${collectionIndex + 1}).`);
-                }
-            }
-            const plateIdText = plateId == null ? "" : String(plateId).trim();
-            if (!plateIdText && lat == null) {
-                throw new Error(`${fileName} has a collection without a plate ID or coordinates on ${record.date} (item ${collectionIndex + 1}).`);
-            }
-            return {plateId: plateIdText || null, lat, lon, datetime: collection?.datetime ?? null};
-        });
-        return {date: String(record.date), trackPoints, collectionScans};
-    }).sort((a, b) => a.date.localeCompare(b.date));
+    return {cells, cellKey, cellSize, globalSegments, project};
 }
 
-function parseBeatFile(fileName, data) {
-    if (!data || typeof data !== "object" || typeof data.geofence !== "string" || !Array.isArray(data.houses)) {
-        throw new Error(`${fileName} must contain a geofence string and a houses array.`);
+function distanceFromRouteIndexMeters(point, index) {
+    if (!index) return Infinity;
+    const projected = index.project(point);
+    const key = index.cellKey(
+        Math.floor(projected.x / index.cellSize),
+        Math.floor(projected.y / index.cellSize),
+    );
+    let minimum = Infinity;
+    for (const segment of index.globalSegments) {
+        minimum = Math.min(minimum, distanceFromRouteSegmentMeters(point, segment.from, segment.to));
     }
-
-    const geofence = data.geofence.split(";").map((pair, index) => {
-        const values = pair.split(",").map(Number);
-        if (values.length !== 2 || !values.every(Number.isFinite) || Math.abs(values[0]) > 90 || Math.abs(values[1]) > 180) {
-            throw new Error(`${fileName} has an invalid geofence coordinate at item ${index + 1}.`);
-        }
-        return values;
-    });
-    if (geofence.length < 3) {
-        throw new Error(`${fileName} geofence must contain at least three coordinates.`);
+    for (const segment of index.cells.get(key) || []) {
+        minimum = Math.min(minimum, distanceFromRouteSegmentMeters(point, segment.from, segment.to));
     }
-
-    const coordinateOccurrences = new Map();
-    const houses = data.houses.map((house, index) => {
-        const lat = Number(house?.lat);
-        const lon = Number(house?.lon);
-        const houseId = house?.house_id ?? house?.House_Id ?? house?.houseId;
-        const masterPlateId = house?.master_plate_id ?? house?.masterPlateId;
-        if (house?.lat == null || String(house.lat).trim() === "" || house?.lon == null || String(house.lon).trim() === "" ||
-            !Number.isFinite(lat) || Math.abs(lat) > 90 || !Number.isFinite(lon) || Math.abs(lon) > 180) {
-            throw new Error(`${fileName} has an invalid house coordinate at item ${index + 1}.`);
-        }
-        const coordinateKey = `${lat.toFixed(7)},${lon.toFixed(7)}`;
-        const occurrence = coordinateOccurrences.get(coordinateKey) || 0;
-        coordinateOccurrences.set(coordinateKey, occurrence + 1);
-        const normalizedHouseId = houseId == null || String(houseId).trim() === ""
-            ? null
-            : String(houseId).trim();
-        return {
-            lat,
-            lon,
-            house_id: normalizedHouseId,
-            route_key: `${coordinateKey}:${occurrence}`,
-            hasHouseId: normalizedHouseId != null,
-            master_plate_id: masterPlateId == null || String(masterPlateId).trim() === ""
-                ? null
-                : String(masterPlateId).trim(),
-        };
-    });
-    if (houses.length === 0) {
-        throw new Error(`${fileName} contains no houses.`);
-    }
-    if (data.dumpyards != null && !Array.isArray(data.dumpyards)) {
-        throw new Error(`${fileName} dumpyards property must be an array.`);
-    }
-    const dumpyards = (data.dumpyards || []).map((dumpyard, index) => {
-        const lat = Number(dumpyard?.lat);
-        const lon = Number(dumpyard?.lon);
-        if (dumpyard?.lat == null || String(dumpyard.lat).trim() === "" ||
-            dumpyard?.lon == null || String(dumpyard.lon).trim() === "" ||
-            !Number.isFinite(lat) || Math.abs(lat) > 90 || !Number.isFinite(lon) || Math.abs(lon) > 180) {
-            throw new Error(`${fileName} has an invalid dumpyard coordinate at item ${index + 1}.`);
-        }
-        return {lat, lon, name: String(dumpyard.name || dumpyard.dumpyard_id || `Dumpyard ${index + 1}`)};
-    });
-    return {
-        geofence: data.geofence,
-        fencePoints: geofence,
-        houses,
-        dumpyards,
-        hasHouseIds: houses.every((house) => house.hasHouseId),
-        name: fileName,
-    };
-}
-
-function parseCombinedFile(fileName, data) {
-    if (!data || typeof data !== "object" || Array.isArray(data) ||
-        typeof data.geofence !== "string" || !Array.isArray(data.houses) || !Array.isArray(data.routes)) {
-        throw new Error(`${fileName} must contain geofence, houses, and routes properties in JSON format.`);
-    }
-
-    const beat = parseBeatFile(fileName, data);
-    const days = parseVehicleFile(fileName, data.routes);
-    const coordinatesByReference = new Map();
-    for (const day of days) {
-        for (const scan of day.collectionScans) {
-            if (!scan.plateId || scan.lat == null || scan.lon == null) continue;
-            const coordinates = coordinatesByReference.get(scan.plateId) || new Set();
-            coordinates.add(`${scan.lat},${scan.lon}`);
-            coordinatesByReference.set(scan.plateId, coordinates);
-        }
-    }
-    const dumpRecords = data.routes.reduce((count, route) =>
-        count + (Array.isArray(route?.dumplist) ? route.dumplist.length : 0), 0);
-
-    return {
-        beat: {
-            ...beat,
-            dataQuality: {
-                housesWithIds: beat.houses.filter((house) => house.hasHouseId).length,
-                referencesAtMultipleCoordinates: [...coordinatesByReference.values()]
-                    .filter((coordinates) => coordinates.size > 1).length,
-                dumpRecords,
-                hasVehicleId: Boolean(data.vehicle_id || data.vehicleId ||
-                    data.routes.some((route) => route?.vehicle_id || route?.vehicleId)),
-                hasBeatId: Boolean(data.beat_id || data.beatId),
-            },
-        },
-        days,
-    };
+    return minimum;
 }
 
 function getOutsideBeatSections(routePath, polygon) {
-    if (!routePath?.length || polygon?.length < 3) {
+    const polygons = Array.isArray(polygon?.[0]?.[0]) ? polygon : [polygon];
+    if (!routePath?.length || !polygons.some((item) => item?.length >= 3)) {
         return {sections: [], distanceKm: 0};
     }
 
@@ -300,7 +198,7 @@ function getOutsideBeatSections(routePath, polygon) {
                 lat: (start.lat + end.lat) / 2,
                 lon: (start.lon + end.lon) / 2,
             };
-            if (!isInsidePolygon(midpoint, polygon)) {
+            if (!polygons.some((item) => isInsidePolygon(midpoint, item))) {
                 if (!activeSection) activeSection = [start];
                 activeSection.push(end);
                 distanceMeters += segmentLength / steps;
@@ -342,16 +240,146 @@ function getCollectionLocations(day) {
     }));
 }
 
-function FitMapBounds({points, visible}) {
+function sampleTrackPoints(points, maxPoints) {
+    if (points.length <= maxPoints) return points;
+    return Array.from({length: maxPoints}, (_, index) =>
+        points[Math.round(index * (points.length - 1) / (maxPoints - 1))]
+    );
+}
+
+function createHousePopup(lines) {
+    const content = document.createElement("div");
+    lines.forEach((line, index) => {
+        if (index > 0) content.append(document.createElement("br"));
+        content.append(document.createTextNode(line));
+    });
+    return content;
+}
+
+function CanvasHouseLayer({data, historicalPath, nearRouteThreshold, onHouseSelect}) {
     const map = useMap();
+    const onHouseSelectRef = useRef(onHouseSelect);
+    const historicalPathRef = useRef(historicalPath);
+    const nearRouteThresholdRef = useRef(nearRouteThreshold);
+    onHouseSelectRef.current = onHouseSelect;
+    historicalPathRef.current = historicalPath;
+    nearRouteThresholdRef.current = nearRouteThreshold;
+
+    React.useEffect(() => {
+        if (!data.features.length) return undefined;
+        const canvas = L.DomUtil.create("canvas", "leaflet-house-canvas leaflet-zoom-animated");
+        canvas.style.position = "absolute";
+        canvas.style.pointerEvents = "none";
+        map.getPanes().overlayPane.appendChild(canvas);
+        const context = canvas.getContext("2d");
+        if (!context) {
+            L.DomUtil.remove(canvas);
+            throw new Error("Could not create the map house-marker canvas.");
+        }
+
+        const pixelRatio = Math.max(1, window.devicePixelRatio || 1);
+        const draw = () => {
+            const size = map.getSize();
+            const topLeft = map.containerPointToLayerPoint([0, 0]);
+            L.DomUtil.setPosition(canvas, topLeft);
+            canvas.width = size.x * pixelRatio;
+            canvas.height = size.y * pixelRatio;
+            canvas.style.width = `${size.x}px`;
+            canvas.style.height = `${size.y}px`;
+            context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+            context.clearRect(0, 0, size.x, size.y);
+            let currentDashArray = "";
+
+            for (const feature of data.features) {
+                const {house, radius, markerColor, fillColor, fillOpacity, weight, dashArray} = feature.properties;
+                const point = map.latLngToLayerPoint([house.lat, house.lon]).subtract(topLeft);
+                if (point.x < -radius || point.y < -radius || point.x > size.x + radius || point.y > size.y + radius) continue;
+
+                context.beginPath();
+                context.arc(point.x, point.y, radius, 0, Math.PI * 2);
+                context.globalAlpha = fillOpacity;
+                context.fillStyle = fillColor;
+                context.fill();
+                context.globalAlpha = 1;
+                context.lineWidth = weight;
+                context.strokeStyle = markerColor;
+                const nextDashArray = dashArray || "";
+                if (nextDashArray !== currentDashArray) {
+                    context.setLineDash(nextDashArray ? nextDashArray.split(" ").map(Number) : []);
+                    currentDashArray = nextDashArray;
+                }
+                context.stroke();
+            }
+            if (currentDashArray) context.setLineDash([]);
+        };
+        const handleClick = (event) => {
+            const clickPoint = map.latLngToContainerPoint(event.latlng);
+            let nearestFeature = null;
+            let nearestDistanceSquared = 14 * 14;
+            for (const feature of data.features) {
+                const {house} = feature.properties;
+                const housePoint = map.latLngToContainerPoint([house.lat, house.lon]);
+                const dx = clickPoint.x - housePoint.x;
+                const dy = clickPoint.y - housePoint.y;
+                const distanceSquared = dx * dx + dy * dy;
+                if (distanceSquared < nearestDistanceSquared) {
+                    nearestFeature = feature;
+                    nearestDistanceSquared = distanceSquared;
+                }
+            }
+            if (!nearestFeature) return;
+            const {house, beat, hasBeatDetails, popupLines} = nearestFeature.properties;
+            const lines = [...popupLines];
+            if (hasBeatDetails) {
+                const historicalDistance = distanceFromRouteMeters(house, historicalPathRef.current);
+                lines.push(
+                    Number.isFinite(historicalDistance) && historicalDistance <= nearRouteThresholdRef.current
+                        ? `Within ${nearRouteThresholdRef.current} m of the selected day's GPS track (${Math.round(historicalDistance)} m away)`
+                        : `Outside the ${nearRouteThresholdRef.current} m selected-route corridor`,
+                    "GPS or route proximity does not confirm collection.",
+                );
+            }
+            onHouseSelectRef.current(house, beat);
+            map.openPopup(createHousePopup(lines), [house.lat, house.lon]);
+        };
+
+        map.on("moveend zoomend resize", draw);
+        map.on("click", handleClick);
+        draw();
+        return () => {
+            map.off("moveend zoomend resize", draw);
+            map.off("click", handleClick);
+            L.DomUtil.remove(canvas);
+        };
+    }, [data, map]);
+
+    return null;
+}
+
+function FitMapBounds({points, visible, layoutKey, focusHouse}) {
+    const map = useMap();
+    const focusHouseRef = useRef(focusHouse);
+    focusHouseRef.current = focusHouse;
     React.useEffect(() => {
         if (!visible || points.length === 0) return undefined;
         const frame = requestAnimationFrame(() => {
             map.invalidateSize();
-            map.fitBounds(points, {padding: [28, 28]});
+            if (!focusHouseRef.current) map.fitBounds(points, {padding: [28, 28]});
         });
         return () => cancelAnimationFrame(frame);
-    }, [map, points, visible]);
+    }, [map, points, visible, layoutKey]);
+    return null;
+}
+
+function FocusHouse({house}) {
+    const map = useMap();
+    React.useEffect(() => {
+        if (!house || house.lat == null || house.lon == null) return;
+        const frame = requestAnimationFrame(() => {
+            map.flyTo([house.lat, house.lon], Math.max(map.getZoom(), 18), {duration: 0.35});
+        });
+        return () => cancelAnimationFrame(frame);
+    }, [house, map]);
     return null;
 }
 
@@ -362,6 +390,10 @@ function formatDuration(minutes) {
 
 function BeatRouteMap({
     beat,
+    boundaryBeats,
+    employeeRouteLayers,
+    showAllEmployeeHouses,
+    individualEmployeeSelected,
     routes,
     selectedRouteId,
     recordedRoute,
@@ -373,58 +405,153 @@ function BeatRouteMap({
     showCollectedOnly,
     collectionMappingAvailable,
     collectionLocations,
+    isMapMaximized,
+    onHouseSelect,
+    optimizationCandidateHouseIds,
+    focusHouse,
 }) {
     const [isPlaying, setIsPlaying] = useState(false);
     const [playbackType, setPlaybackType] = useState("historical");
     const [progress, setProgress] = useState(0);
     const progressRef = useRef(0);
+    const canvasRenderer = useMemo(() => L.canvas({padding: 0.5}), []);
     const selectedRoute = routes.find((route) => route.route_id === selectedRouteId);
-    const stops = selectedRoute?.stops || routes[0]?.stops || [];
+    const stops = useMemo(
+        () => selectedRoute?.stops || routes[0]?.stops || [],
+        [routes, selectedRoute],
+    );
+    const recordedRouteColor = employeeRouteLayers.length === 1
+        ? employeeRouteLayers[0].color
+        : "#0f766e";
     const plannedHouseKeys = useMemo(
         () => new Set(stops.filter((stop) => stop.type === "house").map((stop) => stop.house_id)),
         [stops],
     );
     const visibleHouses = useMemo(
         () => (beat?.houses || []).filter((house) =>
-            !showCollectedOnly || (collectionMappingAvailable && coveredHouseIds.has(house.house_id))
+            house.lat != null && house.lon != null &&
+            (!showCollectedOnly || coveredHouseIds.has(house.house_id))
         ),
-        [beat, collectionMappingAvailable, coveredHouseIds, showCollectedOnly],
+        [beat, coveredHouseIds, showCollectedOnly],
     );
-    const historicalPath = useMemo(
-        () => recordedRoute?.route_path?.length
+    const houseEntries = useMemo(() => beat
+        ? visibleHouses.map((house) => ({house, beat}))
+        : showAllEmployeeHouses
+            ? boundaryBeats.flatMap((boundary) => (boundary.houses || [])
+                .filter((house) => Number.isFinite(house.lat) && Number.isFinite(house.lon))
+                .map((house) => ({house, beat: boundary})))
+            : [],
+    [beat, boundaryBeats, showAllEmployeeHouses, visibleHouses]);
+    const historicalPath = useMemo(() => recordedRoute?.route_path?.length
             ? recordedRoute.route_path
-            : trackPoints.map(({lat, lon}) => ({lat, lon})),
+            : trackPoints,
         [recordedRoute, trackPoints],
     );
+    const displayHistoricalPath = useMemo(
+        () => sampleTrackPoints(historicalPath, 5000),
+        [historicalPath],
+    );
     const historicalOutsideBeat = useMemo(
-        () => getOutsideBeatSections(historicalPath, beat?.fencePoints),
-        [historicalPath, beat],
+        () => getOutsideBeatSections(displayHistoricalPath, beat?.fencePolygons || beat?.fencePoints),
+        [displayHistoricalPath, beat],
     );
     const optimizedOutsideBeat = useMemo(
-        () => getOutsideBeatSections(selectedRoute?.route_path, beat?.fencePoints),
+        () => getOutsideBeatSections(selectedRoute?.route_path, beat?.fencePolygons || beat?.fencePoints),
         [selectedRoute, beat],
     );
     const playbackPath = playbackType === "historical" ? historicalPath : selectedRoute?.route_path || [];
-    const gpsTrackDistances = useMemo(() => {
-        const result = new Map();
-        if (!beat || !trackPoints.length) return result;
-        for (const house of beat.houses) {
-            result.set(house.route_key, distanceFromRouteMeters(house, trackPoints));
-        }
-        return result;
-    }, [beat, trackPoints]);
+    const houseFeatureData = useMemo(() => ({
+        type: "FeatureCollection",
+        features: houseEntries.map(({house, beat: houseBeat}) => {
+            const categoryColor = HOUSE_STATUS_STYLES[house.collectionStatus];
+            const includedInPlan = plannedHouseKeys.has(house.route_key);
+            const collectedToday = house.house_id != null && coveredHouseIds.has(house.house_id);
+            const isOptimizationCandidate = optimizationCandidateHouseIds.has(house.house_id);
+            const markerColor = beat
+                ? includedInPlan ? "#1d4ed8"
+                    : collectedToday ? "#0891b2"
+                        : isOptimizationCandidate ? "#f97316"
+                            : categoryColor.stroke
+                : houseBeat.employeeColor || categoryColor.stroke;
+            const popupLines = beat
+                ? [
+                    house.house_id
+                        ? `House ID: ${house.house_id}`
+                        : "House ID unavailable; coordinate-only candidate",
+                    `${house.lat.toFixed(6)}, ${house.lon.toFixed(6)}`,
+                    `Reported status: ${categoryColor.label}`,
+                    `Scanner: ${house.scannerName || "Unavailable"} (${house.scannerUserId || "ID unavailable"})`,
+                    `Scanning date: ${house.scanningDate || "Not recorded"}`,
+                    collectionMappingAvailable
+                        ? collectedToday
+                            ? "Collection record linked to the selected route date"
+                            : "No linked collection record for the selected route date"
+                        : "Selected-day collection history unavailable",
+                    includedInPlan
+                        ? "Included in the recommended route (planned, not confirmed collected)"
+                        : "Not included in the recommended route",
+                    ...(house.master_plate_id ? [`Master plate: ${house.master_plate_id}`] : []),
+                    isOptimizationCandidate
+                        ? "Eligible remaining house within the route corridor"
+                        : "Not currently eligible for route optimization",
+                ]
+                : [
+                    `Beat: ${houseBeat.beatName}`,
+                    house.house_id ? `House ID: ${house.house_id}` : "House ID unavailable",
+                    categoryColor.label,
+                    `Scanner: ${house.scannerName || "Unavailable"} (${house.scannerUserId || "ID unavailable"})`,
+                    `Scanning date: ${house.scanningDate || "Not recorded"}`,
+                    `${house.lat.toFixed(6)}, ${house.lon.toFixed(6)}`,
+                ];
+            return {
+                type: "Feature",
+                geometry: {type: "Point", coordinates: [house.lon, house.lat]},
+                properties: {
+                    house,
+                    beat: houseBeat,
+                    hasBeatDetails: Boolean(beat),
+                    popupLines,
+                    markerColor,
+                    fillColor: categoryColor.fill,
+                    fillOpacity: beat ? 0.95 : 0.9,
+                    radius: beat ? 6 : 5,
+                    weight: beat && (includedInPlan || collectedToday || isOptimizationCandidate) ? 4 : 2,
+                    dashArray: beat && isOptimizationCandidate && !includedInPlan && !collectedToday
+                        ? "3 3"
+                        : null,
+                },
+            };
+        }),
+    }), [
+        beat,
+        collectionMappingAvailable,
+        coveredHouseIds,
+        houseEntries,
+        optimizationCandidateHouseIds,
+        plannedHouseKeys,
+    ]);
     const vehiclePosition = getRoutePosition(playbackPath, progress);
     const bounds = useMemo(() => {
-        const pathPoints = (selectedRoute?.route_path || []).map((point) => [point.lat, point.lon]);
-        const recordedPathPoints = recordedRoute?.route_path?.length
-            ? recordedRoute.route_path.map((point) => [point.lat, point.lon])
-            : trackPoints.map((point) => [point.lat, point.lon]);
-        const housePoints = visibleHouses.map((house) => [house.lat, house.lon]);
+        const pathPoints = sampleTrackPoints(selectedRoute?.route_path || [], 2000)
+            .map((point) => [point.lat, point.lon]);
+        const recordedPathPoints = sampleTrackPoints(recordedRoute?.route_path?.length
+            ? recordedRoute.route_path
+            : trackPoints, 2000).map((point) => [point.lat, point.lon]);
+        const housePoints = houseEntries.map(({house}) => [house.lat, house.lon]);
         const collectionPoints = collectionLocations.map((location) => [location.lat, location.lon]);
         const dumpyardPoints = (beat?.dumpyards || []).map((dumpyard) => [dumpyard.lat, dumpyard.lon]);
         const endpoints = stops.filter((stop) => stop.type !== "house").map((stop) => [stop.lat, stop.lon]);
-        return [...pathPoints, ...recordedPathPoints, ...housePoints, ...collectionPoints, ...dumpyardPoints, ...endpoints, ...(beat?.fencePoints || [])];
-    }, [beat, collectionLocations, recordedRoute, selectedRoute, stops, visibleHouses]);
+        const fencePoints = boundaryBeats.flatMap((boundary) =>
+            (boundary.fencePolygons || [boundary.fencePoints || []]).flat()
+        );
+        const optimizerFencePoints = boundaryBeats.flatMap((boundary) =>
+            (boundary.optimizerFencePolygons || []).flat()
+        );
+        const employeePoints = employeeRouteLayers.flatMap((item) =>
+            sampleTrackPoints(item.trackPoints, 1000).map((point) => [point.lat, point.lon])
+        );
+        return [...pathPoints, ...recordedPathPoints, ...housePoints, ...collectionPoints, ...dumpyardPoints, ...endpoints, ...fencePoints, ...optimizerFencePoints, ...employeePoints];
+    }, [beat, boundaryBeats, collectionLocations, employeeRouteLayers, houseEntries, recordedRoute, selectedRoute, stops, trackPoints]);
     const center = bounds[0] || [0, 0];
     const tileUrl = layer === "satellite"
         ? "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
@@ -465,13 +592,88 @@ function BeatRouteMap({
                     : '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'}
                 url={tileUrl}
             />
-            <FitMapBounds points={bounds} visible={visible}/>
-            {beat?.fencePoints?.length > 2 && (
-                <Polygon
-                    positions={beat.fencePoints}
-                    pathOptions={{color: "#e11d48", weight: 3, fillOpacity: 0.04, dashArray: "7 5"}}
-                />
+            <FitMapBounds points={bounds} visible={visible} layoutKey={isMapMaximized} focusHouse={focusHouse}/>
+            <FocusHouse house={focusHouse}/>
+            {boundaryBeats.flatMap((boundary) =>
+                (boundary.fencePolygons || [boundary.fencePoints || []]).map((polygon, index) =>
+                    {
+                        const selectedBeat = employeeRouteLayers.find((item) =>
+                            item.employee.beatId?.toLowerCase() === boundary.id.toLowerCase()
+                        );
+                        return polygon.length > 2 && (
+                            <Polygon
+                                key={`${boundary.id}-excel-boundary-${index}`}
+                                positions={polygon}
+                                pathOptions={{
+                                    color: boundary.employeeColor || selectedBeat?.color || "#dc2626",
+                                    weight: selectedBeat ? 5 : 2,
+                                    fillColor: boundary.employeeColor || selectedBeat?.color || "#dc2626",
+                                    fillOpacity: selectedBeat ? 0.14 : 0.01,
+                                }}
+                            />
+                        );
+                    }
+                )
             )}
+            {boundaryBeats.flatMap((boundary) =>
+                (boundary.optimizerFencePolygons || []).map((polygon, index) =>
+                    polygon.length > 2 && (
+                        <Polygon
+                            key={`${boundary.id}-employee-file-boundary-${index}`}
+                            positions={polygon}
+                            pathOptions={{
+                                color: boundary.employeeColor || employeeRouteLayers.find((item) =>
+                                    item.employee.beatId?.toLowerCase() === boundary.id.toLowerCase()
+                                )?.color || "#2563eb",
+                                weight: 2,
+                                fillOpacity: 0.02,
+                                dashArray: "7 5",
+                            }}
+                        />
+                    )
+                )
+            )}
+            {employeeRouteLayers.map(({employee, trackPoints, color}) => {
+                const routeLinePoints = sampleTrackPoints(trackPoints, 2000);
+                const gpsFixPoints = showAllEmployeeHouses && !beat
+                    ? []
+                    : sampleTrackPoints(trackPoints, 300);
+                return (
+                    <React.Fragment key={`employee-route-${employee.id}`}>
+                    {routeLinePoints.length > 1 && (
+                        <Polyline
+                            positions={routeLinePoints.map((point) => [point.lat, point.lon])}
+                            pathOptions={{color, weight: 3, opacity: 0.75, dashArray: "6 5"}}
+                        >
+                            <Popup>{employee.name} ({employee.id}) · GPS route for {trackPoints[0].datetime?.slice(0, 10) || "selected date"}</Popup>
+                        </Polyline>
+                    )}
+                    {gpsFixPoints.map((point, index) => (
+                        <CircleMarker
+                            key={`${employee.id}-gps-${point.timestamp || index}`}
+                            center={[point.lat, point.lon]}
+                            radius={3}
+                            renderer={canvasRenderer}
+                            pathOptions={{color, fillColor: color, fillOpacity: 0.75, weight: 1}}
+                        >
+                            <Popup>{employee.name} ({employee.id}) recorded GPS fix</Popup>
+                        </CircleMarker>
+                    ))}
+                    {trackPoints.length > 0 && (
+                        <>
+                            <CircleMarker center={[trackPoints[0].lat, trackPoints[0].lon]} radius={5} renderer={canvasRenderer}
+                                pathOptions={{color, fillColor: "#fff", fillOpacity: 1, weight: 2}}>
+                                <Popup>{employee.name} ({employee.id}) · route start</Popup>
+                            </CircleMarker>
+                            <CircleMarker center={[trackPoints[trackPoints.length - 1].lat, trackPoints[trackPoints.length - 1].lon]} radius={5} renderer={canvasRenderer}
+                                pathOptions={{color, fillColor: color, fillOpacity: 1, weight: 2}}>
+                                <Popup>{employee.name} ({employee.id}) · latest route point</Popup>
+                            </CircleMarker>
+                        </>
+                    )}
+                    </React.Fragment>
+                );
+            })}
             {recordedRoute?.route_path?.length > 1 && (
                 <>
                     <Polyline
@@ -480,7 +682,7 @@ function BeatRouteMap({
                     />
                     <Polyline
                         positions={recordedRoute.route_path.map((point) => [point.lat, point.lon])}
-                        pathOptions={{color: "#0f766e", weight: 4, opacity: 0.9, dashArray: "8 5"}}
+                        pathOptions={{color: recordedRouteColor, weight: 4, opacity: 0.9, dashArray: "8 5"}}
                     >
                         <Popup>
                             Recorded vehicle trip, road-matched through {recordedRoute.point_count} timestamped GPS points.
@@ -490,9 +692,9 @@ function BeatRouteMap({
                     </Polyline>
                 </>
             )}
-            {!recordedRoute?.route_path?.length && trackPoints.length > 1 && (
+            {!recordedRoute?.route_path?.length && trackPoints.length > 1 && employeeRouteLayers.length === 0 && (
                 <Polyline
-                    positions={trackPoints.map((point) => [point.lat, point.lon])}
+                    positions={sampleTrackPoints(trackPoints, 2000).map((point) => [point.lat, point.lon])}
                     pathOptions={{color: "#0f766e", weight: 4, opacity: 0.9, dashArray: "5 5"}}
                 >
                     <Popup>
@@ -543,63 +745,56 @@ function BeatRouteMap({
                 />
             ))}
             {collectionLocations.map((location, index) => (
-                <CircleMarker
-                    key={`collection-${location.lat}-${location.lon}-${index}`}
-                    center={[location.lat, location.lon]}
-                    radius={location.isMasterPlate ? 9 : 7}
-                    pathOptions={{color: "#047857", fillColor: "#34d399", fillOpacity: 0.95, weight: 3}}
-                >
-                    <Popup>
-                        <strong>{location.isMasterPlate ? "Master-plate scan location" : "House collection scan"}</strong><br/>
-                        {location.lat.toFixed(6)}, {location.lon.toFixed(6)}<br/>
-                        {location.plateIds.length > 0
-                            ? `${location.plateIds.length} distinct plate ID${location.plateIds.length === 1 ? "" : "s"} scanned here`
-                            : "Plate ID unavailable"}<br/>
-                        {location.plateIds.slice(0, 20).join(", ")}
-                        {location.plateIds.length > 20 ? ", …" : ""}
-                    </Popup>
-                </CircleMarker>
-            ))}
-            {visibleHouses.map((house) => (
                 (() => {
-                    const historicalDistance = gpsTrackDistances.get(house.route_key);
-                    const nearHistoricalRoute = Number.isFinite(historicalDistance) && historicalDistance <= nearRouteThreshold;
-                    const includedInPlan = plannedHouseKeys.has(house.route_key);
-                    const collectedToday = house.house_id != null && coveredHouseIds.has(house.house_id);
-                    const markerColor = includedInPlan ? "#2563eb"
-                        : collectedToday ? "#15803d"
-                            : nearHistoricalRoute ? "#c2410c"
-                                : collectionMappingAvailable ? "#b91c1c" : "#64748b";
-                    const markerFill = includedInPlan ? "#60a5fa"
-                        : collectedToday ? "#4ade80"
-                            : nearHistoricalRoute ? "#fb923c"
-                                : collectionMappingAvailable ? "#f87171" : "#cbd5e1";
+                    const insideAssignedBeat = !beat || (beat.fencePolygons || [beat.fencePoints || []])
+                        .some((polygon) => isInsidePolygon(location, polygon));
+                    const color = insideAssignedBeat ? "#0369a1" : "#7c3aed";
                     return (
                         <CircleMarker
-                            key={house.route_key}
-                            center={[house.lat, house.lon]}
-                            radius={5}
-                            pathOptions={{color: markerColor, fillColor: markerFill, fillOpacity: 0.9, weight: 2}}
+                            key={`collection-${location.lat}-${location.lon}-${index}`}
+                            center={[location.lat, location.lon]}
+                            radius={location.isMasterPlate ? 9 : 7}
+                            renderer={canvasRenderer}
+                            interactive
+                            bubblingMouseEvents={false}
+                            pathOptions={{color, fillColor: insideAssignedBeat ? "#7dd3fc" : "#c4b5fd", fillOpacity: 0.95, weight: 3}}
                         >
                             <Popup>
-                                {house.house_id
-                                    ? <>House ID: {house.house_id}<br/></>
-                                    : <>House ID unavailable; coordinate-only candidate<br/></>}
-                                {house.lat.toFixed(6)}, {house.lon.toFixed(6)}<br/>
-                                {collectionMappingAvailable
-                                    ? collectedToday ? "Collection recorded on the selected day" : "No collection record for the selected day"
-                                    : "Collection status unavailable: house IDs are missing"}<br/>
-                                {includedInPlan ? "Included in the recommended route (planned, not confirmed collected)" : "Not included in the recommended route"}<br/>
-                                {house.master_plate_id && <>Master plate: {house.master_plate_id}<br/></>}
-                                {nearHistoricalRoute
-                                    ? `Route candidate: within ${nearRouteThreshold} m of the selected day's GPS track (${Math.round(historicalDistance)} m away)`
-                                    : `Outside the ${nearRouteThreshold} m selected-route candidate corridor`}
-                                <br/>GPS or route proximity does not confirm collection.
+                                <strong>{location.isMasterPlate ? "Master-plate scan location" : "House collection scan"}</strong><br/>
+                                {individualEmployeeSelected && !insideAssignedBeat && "Outside selected employee's assigned Beat · "}
+                                {location.lat.toFixed(6)}, {location.lon.toFixed(6)}<br/>
+                                {location.plateIds.length > 0
+                                    ? `${location.plateIds.length} distinct plate ID${location.plateIds.length === 1 ? "" : "s"} scanned here`
+                                    : "Plate ID unavailable"}<br/>
+                                {location.plateIds.slice(0, 20).join(", ")}
+                                {location.plateIds.length > 20 ? ", …" : ""}
                             </Popup>
                         </CircleMarker>
                     );
                 })()
             ))}
+            {houseFeatureData.features.length > 0 && (
+                <CanvasHouseLayer
+                    data={houseFeatureData}
+                    historicalPath={historicalPath}
+                    nearRouteThreshold={nearRouteThreshold}
+                    onHouseSelect={onHouseSelect}
+                />
+            )}
+            {focusHouse && Number.isFinite(focusHouse.lat) && Number.isFinite(focusHouse.lon) && (
+                <CircleMarker
+                    center={[focusHouse.lat, focusHouse.lon]}
+                    radius={9}
+                    renderer={canvasRenderer}
+                    interactive={false}
+                    pathOptions={{
+                        color: "#0f172a",
+                        fillColor: HOUSE_STATUS_STYLES[focusHouse.collectionStatus]?.fill || "#fff",
+                        fillOpacity: 0.95,
+                        weight: 4,
+                    }}
+                />
+            )}
             {(beat?.dumpyards || []).map((dumpyard, index) => (
                 <Marker key={`dumpyard-${index}`} position={[dumpyard.lat, dumpyard.lon]} icon={dumpyardIcon}>
                     <Popup>{dumpyard.name}<br/>{dumpyard.lat.toFixed(6)}, {dumpyard.lon.toFixed(6)}<br/>Reference location, not a route stop.</Popup>
@@ -667,10 +862,13 @@ function BeatRouteMap({
     );
 }
 
-export default function BeatHouseRoutePlanner({visible = true}) {
-    const [days, setDays] = useState([]);
+export default function BeatHouseRoutePlanner({
+    visible = true,
+    beatData,
+}) {
     const [selectedDate, setSelectedDate] = useState("");
-    const [beat, setBeat] = useState(null);
+    const [selectedBeatId, setSelectedBeatId] = useState("");
+    const [selectedEmployeeKey, setSelectedEmployeeKey] = useState(ALL_EMPLOYEES);
     const [layer, setLayer] = useState("streets");
     const [routes, setRoutes] = useState([]);
     const [recordedRoute, setRecordedRoute] = useState(null);
@@ -681,44 +879,199 @@ export default function BeatHouseRoutePlanner({visible = true}) {
     const [maxDistanceKm, setMaxDistanceKm] = useState("30");
     const [nearRouteThreshold, setNearRouteThreshold] = useState("50");
     const [showCollectedOnly, setShowCollectedOnly] = useState(false);
+    const [selectedHouse, setSelectedHouse] = useState(null);
+    const [houseDetailsVisible, setHouseDetailsVisible] = useState(false);
+    const [houseSearchQuery, setHouseSearchQuery] = useState("");
+    const [houseSearchError, setHouseSearchError] = useState("");
+    const [isMapMaximized, setIsMapMaximized] = useState(false);
+
+    const beatFiles = beatData?.beats || [];
+    const employees = useMemo(() => beatFiles.map((beat, index) => ({
+        key: beat.id,
+        id: beat.assignedEmployee.id,
+        name: beat.assignedEmployee.name,
+        mappingId: beat.id,
+        beatId: beat.id,
+        days: beat.routes,
+        color: EMPLOYEE_ROUTE_COLORS[index % EMPLOYEE_ROUTE_COLORS.length],
+        beatName: beat.beatName,
+    })), [beatFiles]);
+
+    React.useEffect(() => {
+        if (!isMapMaximized) return undefined;
+        const handleKeyDown = (event) => {
+            if (event.key === "Escape") setIsMapMaximized(false);
+        };
+        window.addEventListener("keydown", handleKeyDown);
+        return () => window.removeEventListener("keydown", handleKeyDown);
+    }, [isMapMaximized]);
+
+    const activeEmployees = useMemo(() => employees.map((employee) => ({
+        id: employee.mappingId,
+        employeeId: employee.id,
+        name: employee.name,
+        beatId: employee.beatId,
+        beatName: employee.beatName,
+        color: employee.color,
+    })), [employees]);
+    const employeeOptions = activeEmployees;
+    const selectedEmployee = selectedEmployeeKey === ALL_EMPLOYEES
+        ? null
+        : employees.find((employee) => employee.mappingId.toLowerCase() === selectedEmployeeKey.toLowerCase()) || null;
+    const selectedEmployeeMapping = activeEmployees.find((employee) =>
+        employee.id.toLowerCase() === selectedEmployeeKey.toLowerCase()
+    ) || null;
+    const employeesInScope = useMemo(() => employees.filter((employee) =>
+        selectedEmployeeKey === ALL_EMPLOYEES
+            ? (!selectedBeatId || employee.beatId === selectedBeatId)
+            : employee.mappingId.toLowerCase() === selectedEmployeeKey.toLowerCase()
+    ), [employees, selectedBeatId, selectedEmployeeKey]);
+    const employeeRouteLayers = useMemo(() =>
+        employeesInScope.flatMap((employee) => {
+            const routeDay = employee.days.find((item) => item.date === selectedDate);
+            return routeDay?.trackPoints.length
+                ? [{employee, trackPoints: routeDay.trackPoints, color: employee.color}]
+                : [];
+        }), [employeesInScope, selectedDate]);
+    const displayedBeatId = selectedEmployeeKey !== ALL_EMPLOYEES
+        ? selectedEmployeeMapping?.beatId || ""
+        : selectedBeatId;
+    const normalizedBeatId = displayedBeatId.toLowerCase();
+    const beat = displayedBeatId ? beatFiles.find((item) =>
+        item.id.toLowerCase() === normalizedBeatId ||
+        item.beatName.toLowerCase() === normalizedBeatId
+    ) || null : null;
+    const boundariesToDisplay = useMemo(() => {
+        const displayAllBoundaries = selectedEmployeeKey !== ALL_EMPLOYEES || !selectedBeatId;
+        const visibleBeats = displayAllBoundaries
+            ? beatFiles
+            : beatFiles.filter((item) => item.id === selectedBeatId);
+        return visibleBeats.map((item) => ({
+            ...item,
+            employeeColor: employees.find((employee) => employee.beatId === item.id)?.color,
+        }));
+    }, [beatFiles, employees, selectedBeatId, selectedEmployeeKey]);
+    const beatBoundaryColor = beat
+        ? employeeRouteLayers.find((item) =>
+            item.employee.beatId?.toLowerCase() === beat.id.toLowerCase()
+        )?.color || "#dc2626"
+        : "#dc2626";
+    const days = useMemo(() => selectedEmployee ? selectedEmployee.days
+        : [...new Set(employeesInScope.flatMap((employee) => employee.days.map((item) => item.date)))]
+            .sort()
+            .map((date) => {
+                const employeeDays = employeesInScope.map((employee) =>
+                    employee.days.find((item) => item.date === date)
+                ).filter(Boolean);
+                return {
+                    date,
+                    trackPoints: employeeDays.flatMap((item) => item.trackPoints),
+                    collectionScans: employeeDays.flatMap((item) => item.collectionScans),
+                    distanceKm: employeeDays.reduce((total, item) => total + item.distanceKm, 0),
+                };
+            }), [employeesInScope, selectedEmployee]);
     const day = days.find((item) => item.date === selectedDate) || null;
     const selectedRoute = routes.find((route) => route.route_id === selectedRouteId) || null;
     const collectionMappingAvailable = Boolean(beat?.hasHouseIds && day);
     const coveredHouseIds = useMemo(() => getCollectedHouseIds(beat, day), [beat, day]);
     const collectionLocations = useMemo(() => getCollectionLocations(day), [day]);
+    const selectedHouseRoute = useMemo(
+        () => selectedHouse?.beat?.routes.find((route) => route.date === selectedDate) || null,
+        [selectedDate, selectedHouse],
+    );
+    const selectedHouseCollectedOnDate = useMemo(
+        () => Boolean(
+            selectedHouse?.beat &&
+            selectedHouse?.house.house_id &&
+            selectedHouseRoute &&
+            getCollectedHouseIds(selectedHouse.beat, selectedHouseRoute).has(selectedHouse.house.house_id)
+        ),
+        [selectedHouse, selectedHouseRoute],
+    );
     const historicalOutsideBeat = useMemo(
-        () => getOutsideBeatSections(recordedRoute?.route_path, beat?.fencePoints),
+        () => getOutsideBeatSections(recordedRoute?.route_path, beat?.fencePolygons || beat?.fencePoints),
         [recordedRoute, beat],
     );
     const optimizedOutsideBeat = useMemo(
-        () => getOutsideBeatSections(selectedRoute?.route_path, beat?.fencePoints),
+        () => getOutsideBeatSections(selectedRoute?.route_path, beat?.fencePolygons || beat?.fencePoints),
         [selectedRoute, beat],
     );
     const closestHouseToRoute = useMemo(() => {
         if (!beat?.houses.length || !day?.trackPoints.length) return null;
-        const referencePath = recordedRoute?.route_path?.length
+        const referencePath = sampleTrackPoints(recordedRoute?.route_path?.length
             ? recordedRoute.route_path
-            : day.trackPoints.map(({lat, lon}) => ({lat, lon}));
+            : day.trackPoints, 300);
         return beat.houses
             .map((house) => ({house, distanceMeters: distanceFromRouteMeters(house, referencePath)}))
             .filter((item) => Number.isFinite(item.distanceMeters))
             .sort((a, b) => a.distanceMeters - b.distanceMeters)[0] || null;
     }, [beat, day, recordedRoute]);
     const routeCorridorMeters = Math.max(0, Number(nearRouteThreshold) || 0);
+    const routeDistanceIndex = useMemo(
+        () => createRouteSegmentIndex(beat && day?.trackPoints.length ? day.trackPoints : null, routeCorridorMeters),
+        [beat, day, routeCorridorMeters],
+    );
     const routeCandidateHouses = useMemo(() => {
         if (!beat?.houses.length) return [];
-        return beat.houses.filter((house) => isInsidePolygon(house, beat.fencePoints));
+        const polygons = beat.fencePolygons || [beat.fencePoints];
+        return beat.houses.filter((house) =>
+            house.isRouteHouse &&
+            house.lat != null &&
+            house.lon != null &&
+            polygons.some((polygon) => isInsidePolygon(house, polygon))
+        );
     }, [beat]);
     const housesOnSelectedDayRoute = useMemo(() => {
         if (!day?.trackPoints.length) return [];
-        const gpsPath = day.trackPoints.map(({lat, lon}) => ({lat, lon}));
         return routeCandidateHouses.filter((house) =>
-            distanceFromRouteMeters(house, gpsPath) <= routeCorridorMeters
+            house.collectionStatus === "remaining" &&
+            !coveredHouseIds.has(house.house_id) &&
+            distanceFromRouteIndexMeters(house, routeDistanceIndex) <= routeCorridorMeters
         );
-    }, [day, routeCandidateHouses, routeCorridorMeters]);
-    const collectedCandidateCount = collectionMappingAvailable
-        ? routeCandidateHouses.filter((house) => coveredHouseIds.has(house.house_id)).length
-        : null;
+    }, [coveredHouseIds, day, routeCandidateHouses, routeCorridorMeters, routeDistanceIndex]);
+    const optimizationCandidateHouseIds = useMemo(
+        () => new Set(housesOnSelectedDayRoute.map((house) => house.house_id)),
+        [housesOnSelectedDayRoute],
+    );
+    React.useEffect(() => {
+        setSelectedHouse(null);
+        setHouseDetailsVisible(false);
+        setHouseSearchError("");
+    }, [beatData, selectedBeatId, selectedEmployeeKey, selectedDate]);
+    React.useEffect(() => {
+        if (selectedEmployeeKey !== ALL_EMPLOYEES &&
+            !activeEmployees.some((item) => item.id.toLowerCase() === selectedEmployeeKey.toLowerCase())) {
+            setSelectedEmployeeKey(ALL_EMPLOYEES);
+        }
+    }, [selectedEmployeeKey, activeEmployees]);
+
+    React.useEffect(() => {
+        if (!beatFiles.length) {
+            setSelectedBeatId("");
+            setSelectedEmployeeKey(ALL_EMPLOYEES);
+            setSelectedDate("");
+            setShowCollectedOnly(false);
+            setRoutes([]);
+            setRecordedRoute(null);
+            setSelectedRouteId("");
+            return;
+        }
+        const firstBeat = beatFiles[0];
+        setSelectedBeatId(firstBeat.id);
+        setSelectedEmployeeKey(firstBeat.id);
+        setSelectedDate(firstBeat.routes.at(-1)?.date || "");
+        setShowCollectedOnly(false);
+        setRoutes([]);
+        setRecordedRoute(null);
+        setSelectedRouteId("");
+    }, [beatData]);
+
+    React.useEffect(() => {
+        if (!days.length) return;
+        if (!days.some((item) => item.date === selectedDate)) {
+            setSelectedDate(days[days.length - 1].date);
+        }
+    }, [days, selectedDate]);
 
     const clearResults = () => {
         setRoutes([]);
@@ -726,43 +1079,18 @@ export default function BeatHouseRoutePlanner({visible = true}) {
         setSelectedRouteId("");
     };
 
-    const handleDataFile = async (event) => {
-        const file = event.target.files?.[0];
-        if (!file) return;
-        setError("");
-        setNotice("");
-        clearResults();
-        try {
-            const {beat: parsedBeat, days: parsedDays} = parseCombinedFile(
-                file.name,
-                JSON.parse(await file.text()),
-            );
-            setBeat(parsedBeat);
-            setDays(parsedDays);
-            setShowCollectedOnly(false);
-            const latestDayWithGps = [...parsedDays].reverse().find((item) => item.trackPoints.length > 0);
-            setSelectedDate(latestDayWithGps?.date || parsedDays[parsedDays.length - 1]?.date || "");
-            setNotice(
-                `Loaded ${parsedBeat.houses.length} houses, ${parsedDays.length} route days, and ` +
-                `${parsedBeat.dumpyards.length} dumpyard location${parsedBeat.dumpyards.length === 1 ? "" : "s"} from ${file.name}.` +
-                (parsedBeat.hasHouseIds
-                    ? ""
-                    : " Collection records with coordinates will be shown on the map. Add house IDs only if you want to match scans to the beat's house markers; master-plate links are only needed for a shared master scan.")
-            );
-        } catch (fileError) {
-            setBeat(null);
-            setDays([]);
-            setSelectedDate("");
-            setError(fileError.message || "Could not read the route data file.");
-        } finally {
-            event.target.value = "";
-        }
-    };
-
     const handleOptimize = async () => {
+        if (selectedEmployeeKey === ALL_EMPLOYEES) {
+            setError("Select one employee to optimize that employee's route.");
+            return;
+        }
         if (!day?.trackPoints.length || !beat) return;
+        if (!beat.houses?.length) {
+            setError("This Beat has no house records available to optimize.");
+            return;
+        }
         if (housesOnSelectedDayRoute.length === 0) {
-            setError(`No houses inside the beat are within ${routeCorridorMeters} m of the selected day's GPS route. Increase the route corridor to include nearby houses.`);
+            setError(`No remaining, RouteDetails-linked houses inside the Beat are within ${routeCorridorMeters} m of the selected day's GPS route. Increase the corridor or review the selected day's route data.`);
             return;
         }
         const distanceLimit = Number(maxDistanceKm);
@@ -812,7 +1140,7 @@ export default function BeatHouseRoutePlanner({visible = true}) {
                         ...house,
                         house_id: house.route_key,
                     })),
-                    geofence: beat.geofence,
+                    geofence: beat.optimizerGeofence || beat.geofence,
                     max_routes: 4,
                     max_distance_km: effectiveDistanceLimitKm,
                 }),
@@ -850,37 +1178,113 @@ export default function BeatHouseRoutePlanner({visible = true}) {
         }
     };
 
+    const handleFindHouse = (event) => {
+        event.preventDefault();
+        const query = houseSearchQuery.trim().toLowerCase();
+        if (!query) {
+            setHouseSearchError("Enter a HouseId to find.");
+            return;
+        }
+        const searchableBeatFiles = selectedEmployeeKey !== ALL_EMPLOYEES && beat
+            ? [beat]
+            : boundariesToDisplay;
+        const searchableHouses = searchableBeatFiles.flatMap((boundary) =>
+            (boundary.houses || [])
+                .filter((house) => house.house_id && house.lat != null && house.lon != null)
+                .map((house) => ({house, beat: boundary}))
+        );
+        const match = searchableHouses.find(({house}) => house.house_id.toLowerCase() === query) ||
+            searchableHouses.find(({house}) => house.house_id.toLowerCase().includes(query));
+        if (!match) {
+            setHouseSearchError(`No house matching “${houseSearchQuery.trim()}” with map coordinates was found.`);
+            return;
+        }
+        if (showCollectedOnly && beat?.id === match.beat.id && !coveredHouseIds.has(match.house.house_id)) {
+            setShowCollectedOnly(false);
+        }
+        setSelectedHouse(match);
+        setHouseDetailsVisible(true);
+        setHouseSearchError("");
+    };
+
     return (
         <div className="flex h-full min-h-0 flex-col overflow-y-auto bg-slate-50 p-4">
             <div className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-4">
                 <section className="rounded-xl bg-white p-5 shadow-sm">
                     <h1 className="text-2xl font-bold text-slate-900">Beat House Route Planner</h1>
                     <p className="mt-1 text-sm text-slate-600">
-                    Upload one JSON or TXT file containing JSON with the beat geofence, house coordinates and IDs, dumpyards, and dated vehicle routes.
-                    The selected day&apos;s route is playable; orange houses near that GPS track are the only houses considered for route optimization.
-                    The planner uses OpenStreetMap driving roads, including mapped residential streets and lanes.
-                    Public OSRM routing is used by default, so house and GPS coordinates are sent to its routing service.
+                        Beat ownership and house status come from the shared API upload above. The planner uses the assigned employee&apos;s recorded GPS route as the actual route, then compares it with a route for houses without a recorded collection scan.
+                        Public OSRM routing is used by default, so house and GPS coordinates are sent to its routing service.
                     </p>
-                    {beat?.dataQuality && (
-                        <div className="mt-3 rounded border border-amber-300 bg-amber-50 p-3 text-xs text-amber-950">
-                            Data readiness: {beat.dataQuality.housesWithIds} of {beat.houses.length} house coordinates have explicit house IDs;
-                            {" "}{beat.dataQuality.referencesAtMultipleCoordinates} collection reference IDs appear at multiple recorded coordinates,
-                            so they are not automatically linked to house coordinates.
-                            No IDs are assigned by house-list order. Dump records: {beat.dataQuality.dumpRecords};
-                            vehicle ID: {beat.dataQuality.hasVehicleId ? "provided" : "missing"};
-                            {" "}beat ID: {beat.dataQuality.hasBeatId ? "provided" : "missing"}.
-                            {!beat.dataQuality.dumpRecords && " No recorded dump weights are available from this upload."}
-                        </div>
-                    )}
                     <div className="mt-4 flex flex-wrap items-end gap-4">
-                        <label className="flex flex-col gap-1 text-sm font-medium text-slate-700">
-                            Beat, houses, and route data (.json or .txt)
-                            <input type="file" accept=".json,.txt,application/json,text/plain" onChange={handleDataFile}
-                                className="max-w-xs rounded border border-slate-300 p-2 text-sm"/>
-                        </label>
+                        {beatFiles.length > 0 && (
+                            <label className="flex flex-col gap-1 text-sm font-medium text-slate-700">
+                                Beat
+                                <select
+                                    value={selectedBeatId}
+                                    onChange={(event) => {
+                                        const nextBeatId = event.target.value;
+                                        setSelectedBeatId(nextBeatId);
+                                        setShowCollectedOnly(false);
+                                        const selectedStillInBeat = employees.some((employee) =>
+                                            employee.mappingId === selectedEmployeeKey && employee.beatId === nextBeatId
+                                        );
+                                        if (selectedEmployeeKey !== ALL_EMPLOYEES && !selectedStillInBeat) {
+                                            setSelectedEmployeeKey(ALL_EMPLOYEES);
+                                        }
+                                        clearResults();
+                                        setError("");
+                                        setNotice("");
+                                    }}
+                                    className="rounded border border-slate-300 bg-white p-2"
+                                >
+                                    <option value="">All Beats</option>
+                                    {beatFiles.map((beatFile) => <option key={beatFile.id} value={beatFile.id}>{beatFile.beatName}</option>)}
+                                </select>
+                            </label>
+                        )}
+                        {employeeOptions.length > 0 && (
+                            <label className="flex flex-col gap-1 text-sm font-medium text-slate-700">
+                                Assigned employee
+                                <select
+                                    value={selectedEmployeeKey}
+                                    onChange={(event) => {
+                                        const employeeKey = event.target.value;
+                                        if (employeeKey === ALL_EMPLOYEES) {
+                                            setSelectedEmployeeKey(ALL_EMPLOYEES);
+                                            setSelectedBeatId("");
+                                            setShowCollectedOnly(false);
+                                            clearResults();
+                                            setError("");
+                                            setNotice("");
+                                            return;
+                                        }
+                                        const employee = employees.find((item) => item.mappingId === employeeKey);
+                                        const mapping = activeEmployees.find((item) => item.id === employeeKey);
+                                        setSelectedEmployeeKey(employeeKey);
+                                        if (mapping?.beatId) setSelectedBeatId(mapping.beatId);
+                                        setShowCollectedOnly(false);
+                                        const latestDayWithGps = [...(employee?.days || [])].reverse()
+                                            .find((item) => item.trackPoints.length > 0);
+                                        if (latestDayWithGps) setSelectedDate(latestDayWithGps.date);
+                                        clearResults();
+                                        setError("");
+                                        setNotice("");
+                                    }}
+                                    className="rounded border border-slate-300 bg-white p-2"
+                                >
+                                    <option value={ALL_EMPLOYEES}>All assigned employees</option>
+                                    {employeeOptions.map((employeeId) => (
+                                        <option key={employeeId.id} value={employeeId.id} style={{color: employeeId.color}}>
+                                            ● {employeeId.name} ({employeeId.employeeId}) · {employeeId.beatName} · {employeeId.color}
+                                        </option>
+                                    ))}
+                                </select>
+                            </label>
+                        )}
                         {days.length > 0 && (
                             <label className="flex flex-col gap-1 text-sm font-medium text-slate-700">
-                                Vehicle route date
+                                {selectedEmployee ? "Employee route date" : "Route date"}
                                 <select value={selectedDate} onChange={(event) => {
                                     setSelectedDate(event.target.value);
                                     setShowCollectedOnly(false);
@@ -895,6 +1299,41 @@ export default function BeatHouseRoutePlanner({visible = true}) {
                                     ))}
                                 </select>
                             </label>
+                        )}
+                        {beat && day && (
+                            <div className="flex flex-col gap-1">
+                                <button
+                                    type="button"
+                                    aria-pressed={showCollectedOnly}
+                                    title={`Filter houses to collection records matched on ${day.date}.`}
+                                    disabled={!collectionMappingAvailable || coveredHouseIds.size === 0}
+                                    onClick={() => {
+                                        setShowCollectedOnly((showing) => !showing);
+                                        setSelectedHouse(null);
+                                        setHouseDetailsVisible(false);
+                                    }}
+                                    className="rounded border border-blue-300 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-900 hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                    {showCollectedOnly
+                                        ? "Show all Beat houses"
+                                        : `Show only ${day.date} collections (${coveredHouseIds.size} houses)`}
+                                </button>
+                                {day.collectionScans.length > 0 && coveredHouseIds.size === 0 && (
+                                    <span className="max-w-56 text-xs text-amber-800">
+                                        This date has scans, but none match a house in this Beat.
+                                    </span>
+                                )}
+                            </div>
+                        )}
+                        {employeeRouteLayers.length > 0 && (
+                            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-700">
+                                {employeeRouteLayers.map(({employee, color}) => (
+                                    <span key={employee.key} className="inline-flex items-center gap-1">
+                                        <span className="inline-block h-2.5 w-2.5 rounded-full" style={{backgroundColor: color}}/>
+                                        {employee.name} ({employee.id})
+                                    </span>
+                                ))}
+                            </div>
                         )}
                         <label className="flex flex-col gap-1 text-sm font-medium text-slate-700">
                             Maximum route distance (km)
@@ -920,14 +1359,53 @@ export default function BeatHouseRoutePlanner({visible = true}) {
                             </select>
                         </label>
                         <button type="button" onClick={handleOptimize}
-                            disabled={loading || !day?.trackPoints.length || !beat}
+                            disabled={loading || selectedEmployeeKey === ALL_EMPLOYEES || !day?.trackPoints.length || !beat?.houses.length}
                             className="rounded-lg bg-blue-700 px-4 py-2 font-semibold text-white hover:bg-blue-800 disabled:cursor-not-allowed disabled:opacity-50">
                             {loading ? "Optimizing road routes…" : "Find and compare routes"}
                         </button>
                     </div>
+                    {selectedEmployee && (
+                        <p className="mt-2 text-xs text-slate-600">
+                            Selected employee: {selectedEmployee.name} ({selectedEmployee.id}) · Assigned Beat: {selectedEmployee.beatId || "unmapped"} · {beat?.houses.length || 0} houses loaded
+                        </p>
+                    )}
+                    {selectedEmployeeKey !== ALL_EMPLOYEES && !selectedEmployee && (
+                        <p role="status" className="mt-2 rounded border border-amber-300 bg-amber-50 p-2 text-xs text-amber-900">
+                            The selected Beat has no assigned employee route in this API file.
+                        </p>
+                    )}
+                    {selectedBeatId && beat && !beat.houses.length && (
+                        <p role="status" className="mt-2 rounded border border-amber-300 bg-amber-50 p-2 text-xs text-amber-900">
+                            No house coordinates were supplied for this Beat.
+                        </p>
+                    )}
+                    {selectedBeatId && !beat && (
+                        <p role="status" className="mt-2 rounded border border-amber-300 bg-amber-50 p-2 text-xs text-amber-900">
+                            No Beat boundary matches “{selectedBeatId}”.
+                        </p>
+                    )}
+                    {beat && (
+                        <div className="mt-3 grid gap-2 text-sm sm:grid-cols-2 lg:grid-cols-4">
+                            <div className="rounded border border-slate-200 p-2"><strong>Beat:</strong> {beat.beatName}</div>
+                            <div className="rounded border border-slate-200 p-2"><strong>Assigned employee:</strong> {beat.assignedEmployee.name} ({beat.beatUserId})</div>
+                            <div className="rounded border border-slate-200 p-2"><strong>Total houses:</strong> {beat.totalHouses.toLocaleString()}</div>
+                            <div className="rounded border border-slate-200 p-2"><strong>Data period:</strong> {beat.fromDate || "Unavailable"} – {beat.toDate || "Unavailable"}</div>
+                            <div className="rounded border border-slate-200 p-2"><strong>Collected by assigned employee:</strong> {beat.classificationCounts.own.toLocaleString()}</div>
+                            <div className="rounded border border-slate-200 p-2"><strong>Collected by other employee:</strong> {beat.classificationCounts.other.toLocaleString()}</div>
+                            <div className="rounded border border-slate-200 p-2"><strong>Remaining / not recorded collected:</strong> {beat.classificationCounts.remaining.toLocaleString()}</div>
+                            <div className="rounded border border-slate-200 p-2">
+                                <strong>Beat geofence:</strong> {beat.fencePolygons.length} polygon(s), {beat.fencePolygons.reduce((count, polygon) => count + polygon.length, 0).toLocaleString()} points
+                            </div>
+                        </div>
+                    )}
                     {loading && (
                         <p className="mt-3 text-sm text-slate-600">
-                            Matching the selected day&apos;s historical GPS route to roads and optimizing only houses within {routeCorridorMeters} m of that day&apos;s GPS track. Large road-distance matrices and route alternatives can take several minutes on public routing services.
+                            Matching the selected day&apos;s actual GPS route to roads and optimizing houses without a collection record within {routeCorridorMeters} m of that track. Route alternatives may take several minutes on public routing services.
+                        </p>
+                    )}
+                    {!beatData && (
+                        <p role="status" className="mt-3 rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+                            Upload the API file above to load Beat, house, and route data.
                         </p>
                     )}
                     {day && day.trackPoints.length === 0 && (
@@ -935,48 +1413,39 @@ export default function BeatHouseRoutePlanner({visible = true}) {
                     )}
                     {error && <p role="alert" className="mt-3 rounded bg-red-50 p-3 text-sm text-red-700">{error}</p>}
                     {notice && <p role="status" className="mt-3 rounded bg-blue-50 p-3 text-sm text-blue-800">{notice}</p>}
+                    {beat && beat.unmatchedRouteHouseCoordinates > 0 && (
+                        <p role="status" className="mt-2 text-xs text-amber-800">
+                            {beat.unmatchedRouteHouseCoordinates} RouteDetails house coordinate(s) could not be linked to a HouseId and are excluded from route optimization.
+                        </p>
+                    )}
                 </section>
 
                 <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
                     <div className="rounded-xl bg-white p-4 shadow-sm">
-                        <div className="text-sm text-slate-500">Vehicle route day</div>
-                        <div className="mt-1 text-lg font-semibold">{day?.date || "Upload a vehicle file"}</div>
-                        {day?.trackPoints.length > 0 && <div className="mt-1 text-xs text-slate-500">{day.trackPoints.length} timestamped GPS points</div>}
+                        <div className="text-sm text-slate-500">Actual route</div>
+                        <div className="mt-1 text-lg font-semibold">{day?.date || "—"}</div>
+                        {day?.trackPoints.length > 0 && <div className="mt-1 text-xs text-slate-500">
+                            {day.trackPoints.length.toLocaleString()} GPS points · {day.distanceKm.toFixed(2)} km
+                            {selectedEmployee ? " GPS estimate" : " combined GPS estimate across employees"}
+                        </div>}
                     </div>
                     <div className="rounded-xl bg-white p-4 shadow-sm">
-                        <div className="text-sm text-slate-500">Beat houses</div>
-                        <div className="mt-1 text-lg font-semibold">{beat ? beat.houses.length : "Upload a beat file"}</div>
-                        {beat && <div className="mt-1 text-xs text-slate-500">{beat.dumpyards.length} dumpyard marker{beat.dumpyards.length === 1 ? "" : "s"}</div>}
+                        <div className="text-sm text-slate-500">Total houses</div>
+                        <div className="mt-1 text-lg font-semibold">{beat ? beat.totalHouses.toLocaleString() : "—"}</div>
+                        {beat && <div className="mt-1 text-xs text-slate-500">{routeCandidateHouses.length.toLocaleString()} route-coordinate houses</div>}
                     </div>
                     <div className="rounded-xl bg-white p-4 shadow-sm">
-                        <div className="text-sm text-slate-500">Houses near selected-day route</div>
-                        <div className="mt-1 text-lg font-semibold">{beat ? housesOnSelectedDayRoute.length : "—"}</div>
-                        <div className="mt-1 text-xs text-slate-500">
-                            Within {routeCorridorMeters} m; {routeCandidateHouses.length} total in beat
-                        </div>
+                        <div className="text-sm text-slate-500">Collected by assigned employee</div>
+                        <div className="mt-1 text-lg font-semibold">{beat ? beat.classificationCounts.own.toLocaleString() : "—"}</div>
                     </div>
                     <div className="rounded-xl bg-white p-4 shadow-sm">
-                        <div className="text-sm text-slate-500">Collection status on selected day</div>
-                        <div className="mt-1 text-lg font-semibold">
-                            {collectedCandidateCount == null
-                                ? `${collectionLocations.length} scan locations`
-                                : `${collectedCandidateCount} collected / ${routeCandidateHouses.length - collectedCandidateCount} remaining`}
-                        </div>
-                        <div className="mt-1 text-xs text-slate-500">
-                            {collectionMappingAvailable
-                                ? "House-ID matched coverage"
-                                : `${day?.collectionScans.length || 0} collection records; shown at scan coordinates`}
-                        </div>
+                        <div className="text-sm text-slate-500">Collected by other employee</div>
+                        <div className="mt-1 text-lg font-semibold">{beat ? beat.classificationCounts.other.toLocaleString() : "—"}</div>
                     </div>
                     <div className="rounded-xl bg-white p-4 shadow-sm">
-                        <div className="text-sm text-slate-500">Optimized road distance / time</div>
-                        <div className="mt-1 text-lg font-semibold">{selectedRoute ? `${selectedRoute.distance_km} km` : "—"}</div>
-                        {selectedRoute && (
-                            <div className="mt-1 text-xs text-slate-500">
-                                {formatDuration(selectedRoute.duration_minutes)} estimated driving time;
-                                {" "}{selectedRoute.houses_covered} planned, {Math.max(0, housesOnSelectedDayRoute.length - selectedRoute.houses_covered)} route candidates not selected
-                            </div>
-                        )}
+                        <div className="text-sm text-slate-500">Remaining / not recorded collected</div>
+                        <div className="mt-1 text-lg font-semibold">{beat ? beat.classificationCounts.remaining.toLocaleString() : "—"}</div>
+                        {beat && <div className="mt-1 text-xs text-slate-500">{housesOnSelectedDayRoute.length.toLocaleString()} near-route optimization candidates</div>}
                     </div>
                 </section>
 
@@ -1033,43 +1502,145 @@ export default function BeatHouseRoutePlanner({visible = true}) {
                     </section>
                 )}
 
-                {(beat || routes.length > 0) && (
+                {(beat || boundariesToDisplay.length > 0 || employeeRouteLayers.length > 0 || selectedEmployee || routes.length > 0) && (
                     <>
-                    <section className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-white p-3 shadow-sm">
-                        <div className="flex flex-wrap items-center gap-3 text-xs text-slate-700">
-                            <>
-                                {collectionMappingAvailable || collectionLocations.length > 0 ? (
-                                    <>
-                                        <span><span className="mr-1 inline-block h-3 w-3 rounded-full bg-green-500"/>{collectionMappingAvailable ? `Collected on ${day.date}` : `Collection scans on ${day?.date || "selected day"}`}</span>
-                                        {collectionMappingAvailable && <span><span className="mr-1 inline-block h-3 w-3 rounded-full bg-red-500"/>Not recorded collected</span>}
-                                        {routes.length > 0 && <span><span className="mr-1 inline-block h-3 w-3 rounded-full bg-blue-500"/>Planned route stop (not confirmed collected)</span>}
-                                    </>
-                                ) : <span>No collection records with coordinates or house-ID matches are available for this day.</span>}
-                                <span><span className="mr-1 inline-block h-3 w-3 rounded-full bg-orange-500"/>Near selected-day GPS; optimization candidate</span>
-                            </>
+                    <section className="rounded-xl bg-white p-4 shadow-sm">
+                        <h2 className="text-sm font-semibold text-slate-900">
+                            Map key{day?.date ? ` · selected date ${day.date}` : ""}
+                        </h2>
+                        <div className="mt-2 flex flex-wrap gap-x-5 gap-y-2 text-xs text-slate-700">
+                            {Object.entries(HOUSE_STATUS_STYLES).map(([status, style]) => (
+                                <span key={status} className="inline-flex items-center gap-1.5">
+                                    <span
+                                        className="inline-block h-3.5 w-3.5 rounded-full border-2"
+                                        style={{backgroundColor: style.fill, borderColor: style.stroke}}
+                                    />
+                                    {status === "own"
+                                        ? `${style.label}${beat?.assignedEmployee.name ? ` (${beat.assignedEmployee.name})` : ""}`
+                                        : style.label}
+                                </span>
+                            ))}
+                            {collectionMappingAvailable && (
+                                <span className="inline-flex items-center gap-1.5">
+                                    <span className="inline-block h-3.5 w-3.5 rounded-full border-[3px] border-cyan-600 bg-white"/>
+                                    House has a matched collection record on {day.date}
+                                </span>
+                            )}
+                            {housesOnSelectedDayRoute.length > 0 && (
+                                <span className="inline-flex items-center gap-1.5">
+                                    <span className="inline-block h-3.5 w-3.5 rounded-full border-2 border-dashed border-orange-500 bg-white"/>
+                                    Eligible remaining house near the selected-day route
+                                </span>
+                            )}
+                            {routes.length > 0 && (
+                                <span className="inline-flex items-center gap-1.5">
+                                    <span className="inline-block h-3.5 w-3.5 rounded-full border-[3px] border-blue-700 bg-white"/>
+                                    Planned route stop, not confirmed collected
+                                </span>
+                            )}
+                            {collectionLocations.length > 0 && (
+                                <span className="inline-flex items-center gap-1.5">
+                                    <span className="inline-block h-3.5 w-3.5 rounded-full border-2 border-sky-700 bg-sky-300"/>
+                                    Selected-day scan location (purple if outside this Beat)
+                                </span>
+                            )}
+                            {employeeRouteLayers.map(({employee, color}) => (
+                                <span key={employee.key} className="inline-flex items-center gap-1.5">
+                                    <span className="inline-block w-6 border-t-2 border-dashed" style={{borderColor: color}}/>
+                                    {employee.name}&apos;s recorded GPS route on {selectedDate}
+                                </span>
+                            ))}
+                            {beat && (
+                                <span className="inline-flex items-center gap-1.5">
+                                    <span className="inline-block h-3.5 w-3.5 border-2 bg-blue-50" style={{borderColor: beatBoundaryColor}}/>
+                                    Beat boundary outline
+                                </span>
+                            )}
+                            {historicalOutsideBeat.distanceKm > 0 && (
+                                <span className="inline-flex items-center gap-1.5">
+                                    <span className="inline-block w-6 border-t-4 border-red-600"/>
+                                    Estimated actual-route section outside the Beat
+                                </span>
+                            )}
+                            {optimizedOutsideBeat.distanceKm > 0 && (
+                                <span className="inline-flex items-center gap-1.5">
+                                    <span className="inline-block w-6 border-t-4 border-purple-700"/>
+                                    Estimated planned-route section outside the Beat
+                                </span>
+                            )}
                         </div>
-                        <button
-                            type="button"
-                            onClick={() => setShowCollectedOnly((showing) => !showing)}
-                            disabled={collectionMappingAvailable
-                                ? collectedCandidateCount === 0
-                                : collectionLocations.length === 0}
-                            className="rounded border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
-                        >
-                            {showCollectedOnly
-                                ? "Show all houses"
-                                : collectionMappingAvailable ? "Show collected houses today" : "Show collection scans today"}
-                        </button>
+                        <form onSubmit={handleFindHouse} className="mt-3 flex flex-wrap items-end gap-2">
+                            <label className="grid gap-1 text-xs font-medium text-slate-700">
+                                Find a house by HouseId
+                                <input
+                                    type="search"
+                                    value={houseSearchQuery}
+                                    onChange={(event) => setHouseSearchQuery(event.target.value)}
+                                    placeholder="Enter HouseId"
+                                    className="rounded border border-slate-300 px-2 py-1.5 text-sm"
+                                />
+                            </label>
+                            <button
+                                type="submit"
+                                className="rounded border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                            >
+                                Find and zoom
+                            </button>
+                            {houseSearchError && <p role="alert" className="text-xs text-red-700">{houseSearchError}</p>}
+                        </form>
+                        <p className="mt-2 text-xs text-slate-600">
+                            House fill color is the overall Beat API classification. {collectionMappingAvailable
+                                ? "A cyan outline means a scan matched this selected date."
+                                : "Select one employee or Beat to match selected-date scans to houses."} Dashed lines show recorded employee GPS routes. Click a house marker for its HouseId, scanner, scan date, and route status. At any zoom, clicking within 14 pixels selects the nearest displayed house. The selected house has a dark outline.
+                        </p>
+                        {selectedHouse && houseDetailsVisible && (
+                            <div role="status" className="mt-3 flex flex-wrap items-start justify-between gap-3 rounded border border-blue-200 bg-blue-50 p-3 text-sm text-slate-800">
+                                <div>
+                                    <strong>{selectedHouse.house.house_id || "House"} · {selectedHouse.beat.beatName}</strong>
+                                    <div>Report status: {HOUSE_STATUS_STYLES[selectedHouse.house.collectionStatus].label}</div>
+                                    <div>Scanner: {selectedHouse.house.scannerName || "Unavailable"} ({selectedHouse.house.scannerUserId || "ID unavailable"})</div>
+                                    <div>Scanning date: {selectedHouse.house.scanningDate || "Not recorded"}</div>
+                                    <div>
+                                        {selectedHouseRoute
+                                            ? selectedHouseCollectedOnDate
+                                                ? `Matched to a collection scan on ${selectedDate}`
+                                                : `No matched collection scan on ${selectedDate}`
+                                            : `No route record for ${selectedDate}`}
+                                    </div>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => setHouseDetailsVisible(false)}
+                                    className="rounded border border-blue-300 bg-white px-2 py-1 text-xs font-medium text-blue-900 hover:bg-blue-100"
+                                >
+                                    Close house details
+                                </button>
+                            </div>
+                        )}
                     </section>
-                    <section className="grid min-h-[620px] flex-1 gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(320px,1fr)]">
-                        <div className="min-h-[400px] overflow-hidden rounded-xl bg-white shadow-sm">
+                    <section className={`grid min-h-[620px] flex-1 gap-4 ${isMapMaximized
+                        ? "fixed inset-3 z-[2000] min-h-0 grid-cols-1 bg-slate-50 p-2 shadow-2xl"
+                        : "lg:grid-cols-[minmax(0,2fr)_minmax(320px,1fr)]"}`}>
+                        <div className={`relative min-h-[400px] overflow-hidden rounded-xl bg-white shadow-sm ${isMapMaximized ? "h-full min-h-0" : ""}`}>
+                            <button
+                                type="button"
+                                onClick={() => setIsMapMaximized((maximized) => !maximized)}
+                                aria-label={isMapMaximized ? "Restore map size" : "Maximize map"}
+                                className="absolute right-3 top-3 z-[1200] rounded border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-800 shadow hover:bg-slate-50"
+                            >
+                                {isMapMaximized ? "Restore map" : "Maximize map"}
+                            </button>
                             <BeatRouteMap
-                                key={`${beat?.name || "empty"}-${layer}`}
+                                key={layer}
                                 beat={beat}
+                                boundaryBeats={boundariesToDisplay}
+                                employeeRouteLayers={employeeRouteLayers}
+                                showAllEmployeeHouses={selectedEmployeeKey === ALL_EMPLOYEES}
+                                individualEmployeeSelected={selectedEmployeeKey !== ALL_EMPLOYEES}
                                 routes={routes}
                                 selectedRouteId={selectedRouteId}
                                 recordedRoute={recordedRoute}
-                                trackPoints={day?.trackPoints || []}
+                                trackPoints={selectedEmployee ? day?.trackPoints || [] : []}
                                 layer={layer}
                                 visible={visible}
                                 nearRouteThreshold={Math.max(0, Number(nearRouteThreshold) || 0)}
@@ -1077,9 +1648,17 @@ export default function BeatHouseRoutePlanner({visible = true}) {
                                 showCollectedOnly={showCollectedOnly}
                                 collectionMappingAvailable={collectionMappingAvailable}
                                 collectionLocations={collectionLocations}
+                                isMapMaximized={isMapMaximized}
+                                optimizationCandidateHouseIds={optimizationCandidateHouseIds}
+                                focusHouse={selectedHouse?.house || null}
+                                onHouseSelect={(house, houseBeat) => {
+                                    setSelectedHouse({house, beat: houseBeat});
+                                    setHouseDetailsVisible(true);
+                                    setHouseSearchError("");
+                                }}
                             />
                         </div>
-                        <aside className="flex flex-col gap-3 rounded-xl bg-white p-4 text-sm text-slate-600 shadow-sm">
+                        {!isMapMaximized && <aside className="flex flex-col gap-3 rounded-xl bg-white p-4 text-sm text-slate-600 shadow-sm">
                             <div>
                                 <h2 className="font-semibold text-slate-900">Optimized route</h2>
                                 {closestHouseToRoute && (
@@ -1104,7 +1683,7 @@ export default function BeatHouseRoutePlanner({visible = true}) {
                                         {" "}to {selectedRoute.stops[selectedRoute.stops.length - 1].lat.toFixed(5)}, {selectedRoute.stops[selectedRoute.stops.length - 1].lon.toFixed(5)}
                                     </p>
                                 )}
-                                <p className="mt-1">The teal dashed line is the historical trip. Green houses have a selected-day collection match, red houses do not, and blue houses are proposed route stops. Orange dashed links connect house locations to nearby roads; the red dashed outline is the beat boundary.</p>
+                                <p className="mt-1">House fill shows the overall report status: green is collected by the assigned employee, amber by another employee, and red has no collection record. A cyan outline marks a scan matched to the selected date; orange dashed outlines are eligible route candidates; blue outlines are planned stops, not confirmed collections. Dashed route lines show recorded employee GPS. Orange dashed links connect houses to nearby roads.</p>
                             </div>
                             {routes.map((route, index) => (
                                 <label key={route.route_id}
@@ -1142,7 +1721,7 @@ export default function BeatHouseRoutePlanner({visible = true}) {
                                     </table>
                                 </div>
                             )}
-                        </aside>
+                        </aside>}
                     </section>
                     </>
                 )}
