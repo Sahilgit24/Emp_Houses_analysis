@@ -351,6 +351,8 @@ function normalizeBeat(report, routeDetails, index) {
                 lat: point.lat,
                 lon: point.lon,
                 datetime,
+                scannerName: text(firstValue(scan, ["ScannerName", "scannerName", "EmployeeName", "employeeName"])) || null,
+                scannerUserId: text(firstValue(scan, ["ScannerUserId", "scannerUserId"])) || null,
             };
         });
 
