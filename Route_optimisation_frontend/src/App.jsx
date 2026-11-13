@@ -11,6 +11,12 @@ export default function App() {
     const [loadedSources, setLoadedSources] = useState([]);
     const [uploadError, setUploadError] = useState("");
     const [loadingFile, setLoadingFile] = useState(false);
+    const [highPriorityHouseRequest, setHighPriorityHouseRequest] = useState(null);
+
+    const handleShowHighPriorityHouses = (request) => {
+        setHighPriorityHouseRequest(request);
+        setActivePlanner("route");
+    };
 
     const handleApiFiles = async (event) => {
         const files = Array.from(event.target.files || []);
@@ -97,6 +103,7 @@ export default function App() {
                                 setBeatData(null);
                                 setLoadedSources([]);
                                 setUploadError("");
+                                setHighPriorityHouseRequest(null);
                             }}
                             className="rounded border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100"
                         >
@@ -115,10 +122,17 @@ export default function App() {
             </section>
             <main className="min-h-0 flex-1">
                 <div className={`h-full ${activePlanner === "route" ? "" : "hidden"}`}>
-                    <BeatHouseRoutePlanner visible={activePlanner === "route"} beatData={beatData}/>
+                    <BeatHouseRoutePlanner
+                        visible={activePlanner === "route"}
+                        beatData={beatData}
+                        highPriorityHouseRequest={highPriorityHouseRequest}
+                    />
                 </div>
                 <div className={`h-full ${activePlanner === "analytics" ? "" : "hidden"}`}>
-                    <EmployeeApiDashboard beatData={beatData}/>
+                    <EmployeeApiDashboard
+                        beatData={beatData}
+                        onShowHighPriorityHouses={handleShowHighPriorityHouses}
+                    />
                 </div>
             </main>
         </div>

@@ -127,6 +127,18 @@ test("keeps route-linked history for houses listed as unscanned", () => {
     assert.equal(house.history.collectionCount, 1);
 });
 
+test("keeps ScanningDate history even when the snapshot Scanned flag is false", () => {
+    const withScanningDate = structuredClone(sample);
+    const house = withScanningDate.BeatWiseReport.NotScannedHouses[0];
+    house.ScannerUserId = 7;
+    house.ScanningDate = "2026-10-16T10:00:00+05:30";
+
+    const [beat] = normalizeBeatApiPayload(withScanningDate).beats;
+    const normalizedHouse = beat.houses.find((item) => item.houseId === "H3");
+    assert.equal(normalizedHouse.scanned, false);
+    assert.deepEqual(normalizedHouse.history.collectionDates, ["2026-10-16"]);
+});
+
 test("rejects duplicate HouseIds instead of using row position as an identity", () => {
     const invalid = structuredClone(sample);
     invalid.BeatWiseReport.NotScannedHouses[0].HouseId = "H1";

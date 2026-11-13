@@ -416,7 +416,7 @@ function normalizeBeat(report, routeDetails, index) {
     }).sort((a, b) => a.date.localeCompare(b.date));
 
     houses.forEach((house) => {
-        if (house.scanned && house.scanningDate) {
+        if (house.scanningDate) {
             if (!Number.isFinite(Date.parse(house.scanningDate))) {
                 throw new Error(`House ${house.houseId} ScanningDate must contain a valid date or timestamp.`);
             }
