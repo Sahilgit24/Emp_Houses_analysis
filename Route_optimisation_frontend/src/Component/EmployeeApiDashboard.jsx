@@ -5,6 +5,7 @@ import {
     getReportWindowDays,
     getHighPriorityHouses,
 } from "../data/employeePerformance.js";
+import EmployeeAiReview from "./EmployeeAiReview.jsx";
 
 const COLLECTION_LABELS = {
     own: "Collected by Me",
@@ -191,6 +192,70 @@ export default function EmployeeApiDashboard({beatData, onShowHighPriorityHouses
 
     useEffect(() => setPage(0), [selectedBeatId, collectionFilter, houseSearch]);
 
+    const ownCount = houseCoverage.assignedEmployeeCollected;
+    const otherCount = houseCoverage.otherEmployeeCollected;
+    const remainingCount = houseCoverage.remainingWithoutHistory;
+    const totalHouses = beat?.houses.length || 0;
+    const beatCoveragePercent = totalHouses
+        ? (ownCount + otherCount) * 100 / totalHouses
+        : null;
+    const ownCoveragePercent = totalHouses ? ownCount * 100 / totalHouses : null;
+    const regularRate = attentionCounts.withHistory
+        ? attentionCounts.regular * 100 / attentionCounts.withHistory
+        : null;
+    const aiReviewSummary = useMemo(() => {
+        if (!beat) return null;
+        return {
+            employeeName: beat.assignedEmployee.name,
+            beatName: beat.beatName,
+            reportingPeriod: {
+                from: effectiveStartDate,
+                through: effectiveEndDate,
+                days: reportWindowDays,
+            },
+            coverage: {
+                totalHousesInBeat: totalHouses,
+                housesCollectedByAssignedEmployee: ownCount,
+                housesCollectedByOtherEmployees: otherCount,
+                housesWithAnyCollection: houseCoverage.collectedAtLeastOnce,
+                housesNotCollected: remainingCount,
+                coveragePercent: beatCoveragePercent,
+                coverageDefinition: "Beat coverage percentage uses housesWithAnyCollection divided by totalHousesInBeat; housesWithAnyCollection includes both assigned-employee and other-employee collections.",
+            },
+            collectionRegularity: {
+                regularlyCollectedHouses: attentionCounts.regular,
+                lowFrequencyHouses: attentionCounts.lowFrequency,
+                housesWithLongCollectionGaps: attentionCounts.needsAttention,
+                overdueHouses: attentionCounts.overdue,
+                housesRequiringAttention: attentionCounts.needsAttention + attentionCounts.overdue,
+                highPriorityHouses: highPriorityHouses.length,
+                housesNotCollected: attentionCounts.notCollected,
+                housesWithCollectionHistory: attentionCounts.withHistory,
+                withinObservedPatternPercent: regularRate,
+                withinObservedPatternPercentDefinition: "Percentage of housesWithCollectionHistory whose status is Regular; this does not describe all Beat houses.",
+            },
+            outsideBeatCollection: {
+                distinctHousesCollected: beats.length > 1 ? outsideBeatAnalysis.totalHouses : null,
+            },
+        };
+    }, [
+        attentionCounts,
+        beat,
+        beatCoveragePercent,
+        beats.length,
+        effectiveEndDate,
+        effectiveStartDate,
+        houseCoverage.collectedAtLeastOnce,
+        highPriorityHouses.length,
+        otherCount,
+        outsideBeatAnalysis.totalHouses,
+        ownCount,
+        regularRate,
+        remainingCount,
+        reportWindowDays,
+        totalHouses,
+    ]);
+
     if (!beatData) {
         return (
             <div className="h-full overflow-y-auto bg-slate-50 p-4">
@@ -203,17 +268,6 @@ export default function EmployeeApiDashboard({beatData, onShowHighPriorityHouses
 
     if (!beat) return <div className="p-4 text-sm text-slate-600">No Beat records were found in this API file.</div>;
 
-    const ownCount = houseCoverage.assignedEmployeeCollected;
-    const otherCount = houseCoverage.otherEmployeeCollected;
-    const remainingCount = houseCoverage.remainingWithoutHistory;
-    const totalHouses = beat.houses.length;
-    const beatCoveragePercent = totalHouses
-        ? (ownCount + otherCount) * 100 / totalHouses
-        : null;
-    const ownCoveragePercent = totalHouses ? ownCount * 100 / totalHouses : null;
-    const regularRate = attentionCounts.withHistory
-        ? attentionCounts.regular * 100 / attentionCounts.withHistory
-        : null;
     return (
         <div className="h-full overflow-y-auto bg-slate-50 p-4">
             <div className="mx-auto flex w-full max-w-7xl flex-col gap-4">
@@ -498,6 +552,7 @@ export default function EmployeeApiDashboard({beatData, onShowHighPriorityHouses
                             ` ${formatNumber(beat.historyWarnings.ambiguousReferenceRecords)} ambiguous reference record(s) were excluded from house history.`}
                     </p>
                 )}
+                <EmployeeAiReview summary={aiReviewSummary} />
             </div>
         </div>
     );
