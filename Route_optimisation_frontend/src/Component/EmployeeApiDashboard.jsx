@@ -498,7 +498,7 @@ export default function EmployeeApiDashboard({
                             Houses Requiring Attention &amp; Next Collection Priority
                         </h2>
                         <p className="mt-1 text-xs text-slate-600">
-                            One prioritized list using the existing scan gaps, collection-frequency status, recurring-gap status, and high-priority rules. “Never” means no scan history was provided in the uploaded data.
+                            Only houses without a scan on the selected analysis date are listed, prioritized by historical scan gaps, collection frequency, recurring gaps, and overdue status. “Never” means no scan history was provided in the uploaded data.
                         </p>
                     </div>
                     <div className="mt-3 max-h-[34rem] overflow-auto rounded border border-slate-200">

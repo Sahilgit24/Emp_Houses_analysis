@@ -294,6 +294,31 @@ test("builds next-collection priorities from existing history and attention stat
     assert.equal(priorities[1].lastScannedDate, "2026-10-01");
 });
 
+test("excludes houses scanned on the selected analysis date from next-collection priorities", () => {
+    const coverage = analyzeHouseCoverage([{
+        houseId: "not-scanned-today",
+        history: {collectionDates: ["2026-10-01"]},
+    }, {
+        houseId: "scanned-today",
+        history: {collectionDates: ["2026-10-01", "2026-10-10"]},
+    }], [], "2026-10-01", "2026-10-10", {id: "assigned-user"});
+    const scannedToday = coverage.details.find((detail) =>
+        detail.house.houseId === "scanned-today"
+    );
+
+    const priorities = getNextCollectionPriorities(
+        coverage,
+        10,
+        "2026-10-10",
+        [{detail: scannedToday}],
+    );
+
+    assert.deepEqual(
+        priorities.map((item) => item.detail.house.houseId),
+        ["not-scanned-today"],
+    );
+});
+
 test("coverage trend compares verified windows and reports insufficient data", () => {
     assert.deepEqual(
         getCoverageTrend({collectedAtLeastOnce: 1}, {collectedAtLeastOnce: 2}, 4),

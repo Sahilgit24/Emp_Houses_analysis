@@ -349,6 +349,8 @@ export function getNextCollectionPriorities(coverage, reportWindowDays, endDate,
     );
     return coverage.details.map((detail) => {
         const lastScannedDate = lastScanOnOrBefore(detail, endDate);
+        if (endDate && lastScannedDate === endDate) return null;
+
         const daysSinceScan = daysSince(lastScannedDate, endDate);
         const neverScanned = !detail.house.history?.collectionDates?.length &&
             !detail.house.scanningDate;
