@@ -32,6 +32,12 @@ function daysSince(date, toDate) {
     return Math.max(0, Math.floor((end - start) / 86400000));
 }
 
+function addDays(date, days) {
+    const timestamp = Date.parse(`${date}T00:00:00Z`);
+    if (!Number.isFinite(timestamp)) return null;
+    return new Date(timestamp + days * 86400000).toISOString().slice(0, 10);
+}
+
 function formatElapsedDays(value) {
     return `${Number.isInteger(value) ? value : value.toFixed(1)} days`;
 }
@@ -42,6 +48,35 @@ export function getReportWindowDays(fromDate, toDate) {
     const end = Date.parse(`${toDate.slice(0, 10)}T00:00:00Z`);
     if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null;
     return Math.floor((end - start) / 86400000) + 1;
+}
+
+export function summarizeRecentEmployeeCollectionOutput(coverage, selectedDate) {
+    if (!coverage?.details || !selectedDate) return null;
+
+    const houseIdsByDate = new Map();
+    coverage.details.forEach((detail) => {
+        (detail.assignedCollectionDates || []).forEach((date) => {
+            const houseIds = houseIdsByDate.get(date) || new Set();
+            houseIds.add(detail.house.houseId);
+            houseIdsByDate.set(date, houseIds);
+        });
+    });
+
+    const previousDates = Array.from({length: 5}, (_, index) =>
+        addDays(selectedDate, -(index + 1))
+    ).filter(Boolean);
+    const previousDaysWithScans = previousDates
+        .map((date) => ({date, count: houseIdsByDate.get(date)?.size || 0}))
+        .filter(({count}) => count > 0);
+    const previousBest = previousDaysWithScans.reduce((best, current) =>
+        !best || current.count > best.count ? current : best,
+    null);
+
+    return {
+        selectedDateHouseCount: houseIdsByDate.get(selectedDate)?.size || 0,
+        previousFiveDayPeak: previousBest,
+        previousDaysWithScans: previousDaysWithScans.length,
+    };
 }
 
 export function analyzeOutsideBeatCollections(routes, otherBeats, assignedEmployeeId, fromDate, toDate) {
@@ -237,6 +272,7 @@ export function analyzeHouseCoverage(houses, routes, fromDate, toDate, assignedE
             house,
             collectionDays: collectionDates.length,
             assignedEmployeeCollectionDays: assignedDates.size,
+            assignedCollectionDates: [...assignedDates].sort(),
             assignedEmployeeScanCount: assignedEvents.length,
             otherEmployeeCollectionDays: otherDates.size,
             otherEmployeeScanCount: otherEvents.length,

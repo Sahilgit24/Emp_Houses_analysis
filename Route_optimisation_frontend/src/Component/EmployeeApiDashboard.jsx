@@ -7,14 +7,9 @@ import {
     getNextCollectionPriorities,
     getCoverageTrend,
     summarizeCollectionPatterns,
+    summarizeRecentEmployeeCollectionOutput,
 } from "../data/employeePerformance.js";
 import EmployeeAiReview from "./EmployeeAiReview.jsx";
-
-const COLLECTION_LABELS = {
-    own: "Collected by Me",
-    other: "Collected by Others",
-    remaining: "Not Collected",
-};
 
 function formatNumber(value, digits = 0) {
     return Number(value || 0).toLocaleString(undefined, {maximumFractionDigits: digits});
@@ -73,9 +68,6 @@ export default function EmployeeApiDashboard({
 }) {
     const beats = beatData?.beats || [];
     const [selectedBeatId, setSelectedBeatId] = useState("");
-    const [houseSearch, setHouseSearch] = useState("");
-    const [collectionFilter, setCollectionFilter] = useState("all");
-    const [page, setPage] = useState(0);
     const [priorityPage, setPriorityPage] = useState(0);
 
     useEffect(() => {
@@ -150,6 +142,10 @@ export default function EmployeeApiDashboard({
             )
             : null,
         [beat, effectiveEndDate],
+    );
+    const recentCollectionOutput = useMemo(
+        () => summarizeRecentEmployeeCollectionOutput(houseCoverage, effectiveEndDate),
+        [effectiveEndDate, houseCoverage],
     );
     const previousWindowEndDate = addDays(effectiveStartDate, -1);
     const previousWindowStartDate = reportWindowDays == null || !previousWindowEndDate
@@ -239,19 +235,6 @@ export default function EmployeeApiDashboard({
         return counts;
     }, [houseCoverage]);
 
-    const visibleHouses = useMemo(() => houseCoverage.details
-        .filter((detail) => collectionFilter === "all" || detail.collectionCategory === collectionFilter)
-        .filter(({house}) => {
-            const query = houseSearch.trim().toLowerCase();
-            return !query || house.houseId.toLowerCase().includes(query) ||
-                house.referenceId?.toLowerCase().includes(query);
-        })
-        .sort((a, b) => a.house.houseId.localeCompare(b.house.houseId)),
-    [houseCoverage, collectionFilter, houseSearch]);
-    const pageSize = 100;
-    const pageCount = Math.max(1, Math.ceil(visibleHouses.length / pageSize));
-    const currentPage = Math.min(page, pageCount - 1);
-    const currentHouses = visibleHouses.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
     const otherEmployeeGroups = useMemo(() => {
         const employees = new Map();
         houseCoverage.details.forEach((detail) => {
@@ -275,7 +258,6 @@ export default function EmployeeApiDashboard({
             .sort((a, b) => a.employeeName.localeCompare(b.employeeName));
     }, [houseCoverage]);
 
-    useEffect(() => setPage(0), [selectedBeatId, collectionFilter, houseSearch]);
     useEffect(() => setPriorityPage(0), [selectedBeatId, effectiveEndDate]);
 
     const ownCount = houseCoverage.assignedEmployeeCollected;
@@ -287,6 +269,18 @@ export default function EmployeeApiDashboard({
         houseCoverage.assignedEmployeeCollected + houseCoverage.otherEmployeeCollected;
     const reportNotScannedHouses = beat?.totalNotScannedHouses ??
         houseCoverage.remainingWithoutHistory;
+    const selectedDayHouseCount = recentCollectionOutput?.selectedDateHouseCount ?? 0;
+    const previousFiveDayPeak = recentCollectionOutput?.previousFiveDayPeak;
+    const housesBelowRecentPeak = previousFiveDayPeak
+        ? previousFiveDayPeak.count - selectedDayHouseCount
+        : null;
+    const recentPeakComparison = housesBelowRecentPeak == null
+        ? "Unavailable"
+        : housesBelowRecentPeak > 0
+            ? `${formatNumber(housesBelowRecentPeak)} fewer`
+            : housesBelowRecentPeak < 0
+                ? `${formatNumber(Math.abs(housesBelowRecentPeak))} more`
+                : "Matches recent high";
     const beatCoveragePercent = totalHouses
         ? (ownCount + otherCount) * 100 / totalHouses
         : null;
@@ -641,72 +635,39 @@ export default function EmployeeApiDashboard({
                 </section>
 
                 <section className="rounded-xl bg-white p-4 shadow-sm">
-                    <div className="flex flex-wrap items-end justify-between gap-3">
-                        <div>
-                            <h2 className="text-lg font-semibold text-slate-900">{reportWindowLabel} Collection Frequency</h2>
-                            <p className="mt-1 text-xs text-slate-600">
-                                {formatNumber(houseCoverage.collectedAtLeastOnce)} houses have identified collection activity. Frequency counts route scans and available ScanningDate history.
-                            </p>
-                        </div>
-                        <div className="flex flex-wrap gap-2">
-                            <input
-                                type="search"
-                                value={houseSearch}
-                                onChange={(event) => setHouseSearch(event.target.value)}
-                                placeholder="Search house ID"
-                                className="min-w-60 rounded border border-slate-300 px-3 py-2 text-sm"
-                            />
-                            <select value={collectionFilter} onChange={(event) => setCollectionFilter(event.target.value)}
-                                className="rounded border border-slate-300 bg-white px-3 py-2 text-sm">
-                                <option value="all">All collection categories</option>
-                                <option value="own">{COLLECTION_LABELS.own}</option>
-                                <option value="other">{COLLECTION_LABELS.other}</option>
-                                <option value="remaining">{COLLECTION_LABELS.remaining}</option>
-                            </select>
-                        </div>
+                    <div>
+                        <h2 className="text-lg font-semibold text-slate-900">
+                            Selected-Day Collection Output vs Previous 5 Days
+                        </h2>
+                        <p className="mt-1 text-xs text-slate-600">
+                            Compares unique houses collected by the assigned employee on {formatDate(effectiveEndDate)} with the highest daily count in the five calendar days before it. This is an observed recent high, not guaranteed capacity.
+                        </p>
                     </div>
-                    <div className="mt-3 max-h-[34rem] overflow-auto rounded border border-slate-200">
-                        <table className="w-full min-w-[1050px] text-left text-sm">
-                            <thead className="sticky top-0 bg-slate-50 text-xs font-semibold text-slate-600">
-                                <tr><th className="p-3">House ID</th><th className="p-3">Collection category</th><th className="p-3">Scans / collection days</th><th className="p-3">Me / other scans</th><th className="p-3">Collection frequency</th><th className="p-3">Last scanned</th><th className="p-3">Normal interval</th><th className="p-3">Days since scan</th><th className="p-3">Status</th></tr>
-                            </thead>
-                            <tbody>
-                                {currentHouses.map((detail) => (
-                                    <tr key={detail.house.houseId} className="border-t border-slate-100">
-                                        <td className="p-3 font-medium text-slate-900">{detail.house.houseId}</td>
-                                        <td className="p-3">{COLLECTION_LABELS[detail.collectionCategory]}</td>
-                                        <td className="p-3">{formatNumber(detail.recordedScanCount)} / {formatNumber(detail.collectionDays)}</td>
-                                        <td className="p-3">{formatNumber(detail.assignedEmployeeScanCount)} / {formatNumber(detail.otherEmployeeScanCount)}</td>
-                                        <td className="p-3">{detail.status === "Not Collected"
-                                            ? "Not collected"
-                                            : detail.isLowFrequency
-                                                ? "Significantly below typical"
-                                                : houseCoverage.typicalScanCount == null
-                                                    ? "No frequency baseline"
-                                                    : "Within typical range"}
-                                        </td>
-                                        <td className="p-3">{formatDate(detail.lastRecordedDate)}</td>
-                                        <td className="p-3">{formatDays(detail.typicalIntervalDays)}</td>
-                                        <td className="p-3">{formatDays(detail.currentGapDays)}</td>
-                                        <td className="p-3">{detail.status}</td>
-                                    </tr>
-                                ))}
-                                {!currentHouses.length && <EmptyRow columns={9}>No houses match these filters.</EmptyRow>}
-                            </tbody>
-                        </table>
-                    </div>
-                    <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-sm text-slate-600">
-                        <span>
-                            Showing {visibleHouses.length ? formatNumber(currentPage * pageSize + 1) : 0}–
-                            {formatNumber(Math.min((currentPage + 1) * pageSize, visibleHouses.length))} of {formatNumber(visibleHouses.length)}
-                        </span>
-                        <div className="flex gap-2">
-                            <button type="button" disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}
-                                className="rounded border border-slate-300 px-3 py-1 disabled:opacity-50">Previous</button>
-                            <span className="px-2 py-1">Page {currentPage + 1} of {pageCount}</span>
-                            <button type="button" disabled={currentPage >= pageCount - 1} onClick={() => setPage(currentPage + 1)}
-                                className="rounded border border-slate-300 px-3 py-1 disabled:opacity-50">Next</button>
-                        </div>
+                    <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                        <Card
+                            label={`Collected by employee · ${formatDate(effectiveEndDate)}`}
+                            value={`${formatNumber(selectedDayHouseCount)} houses`}
+                            detail="Distinct HouseIds in this Beat scanned by the assigned employee."
+                        />
+                        <Card
+                            label="Best observed in previous 5 days"
+                            value={previousFiveDayPeak
+                                ? `${formatNumber(previousFiveDayPeak.count)} houses`
+                                : "Unavailable"}
+                            detail={previousFiveDayPeak
+                                ? `${formatNumber(recentCollectionOutput.previousDaysWithScans)} previous day(s) had identified employee scans.`
+                                : "No identified assigned-employee scans in those dates."}
+                        />
+                        <Card
+                            label="Compared with recent high"
+                            value={recentPeakComparison}
+                            tone={housesBelowRecentPeak > 0
+                                ? "text-amber-700"
+                                : housesBelowRecentPeak == null
+                                    ? "text-slate-900"
+                                    : "text-green-700"}
+                            detail="Difference from the previous five-day observed high; not a performance verdict by itself."
+                        />
                     </div>
                 </section>
 

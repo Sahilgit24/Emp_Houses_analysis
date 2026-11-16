@@ -8,6 +8,7 @@ import {
     getNextCollectionPriorities,
     getCoverageTrend,
     summarizeCollectionPatterns,
+    summarizeRecentEmployeeCollectionOutput,
 } from "../src/data/employeePerformance.js";
 
 test("uses the selected reporting window for house collection history", () => {
@@ -89,6 +90,52 @@ test("attributes ScanningDates to each house's ScannerUserId within the selected
     assert.equal(coverage.assignedEmployeeCollected, 1);
     assert.equal(coverage.otherEmployeeCollected, 1);
     assert.equal(coverage.remainingWithoutHistory, 1);
+});
+
+test("compares the selected date with the best assigned-employee count in the prior five days", () => {
+    const houses = Array.from({length: 25}, (_, index) => {
+        const dates = [];
+        if (index < 23) dates.push("2026-10-07");
+        if (index < 20) dates.push("2026-10-09");
+        if (index < 3) dates.push("2026-10-10");
+        if (index === 24) dates.push("2026-10-04");
+        return {
+            houseId: `H${index + 1}`,
+            history: {collectionDates: dates},
+            historyEvents: dates.map((date) => ({
+                date,
+                timestamp: `${date}T09:00:00Z`,
+                source: "house-record-history",
+                scannerUserId: "assigned-user",
+            })),
+        };
+    });
+    houses.push({
+        houseId: "other-employee-only",
+        history: {collectionDates: ["2026-10-08"]},
+        historyEvents: [{
+            date: "2026-10-08",
+            timestamp: "2026-10-08T09:00:00Z",
+            source: "house-record-history",
+            scannerUserId: "other-user",
+        }],
+    });
+    const coverage = analyzeHouseCoverage(
+        houses,
+        [],
+        "2026-10-01",
+        "2026-10-10",
+        {id: "assigned-user"},
+    );
+
+    assert.deepEqual(
+        summarizeRecentEmployeeCollectionOutput(coverage, "2026-10-10"),
+        {
+            selectedDateHouseCount: 3,
+            previousFiveDayPeak: {date: "2026-10-07", count: 23},
+            previousDaysWithScans: 2,
+        },
+    );
 });
 
 test("keeps employee, other-employee, and unverified house scans in separate categories", () => {
