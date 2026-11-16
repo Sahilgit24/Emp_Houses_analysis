@@ -131,6 +131,16 @@ test("uses unique HouseIds and ignores RouteDetails houses and Collectionlist", 
     assert.deepEqual(beat.houses.find((item) => item.houseId === "H3").history.collectionDates, []);
 });
 
+test("reads the geofence from BeatWiseReport", () => {
+    const withReportGeofence = structuredClone(sample);
+    withReportGeofence.BeatWiseReport.Geofence = "21.1,75.1;21.2,75.2;21.3,75.3";
+    delete withReportGeofence.RouteDetails.geofence;
+
+    const [beat] = normalizeBeatApiPayload(withReportGeofence).beats;
+    assert.equal(beat.geofence, withReportGeofence.BeatWiseReport.Geofence);
+    assert.deepEqual(beat.fencePoints, [[21.1, 75.1], [21.2, 75.2], [21.3, 75.3]]);
+});
+
 test("reads ScanningDates once per house and carries the row scanner to each date", () => {
     const withScanningDates = structuredClone(sample);
     withScanningDates.BeatWiseReport.ScannedHouses[0].ScanningDates = [

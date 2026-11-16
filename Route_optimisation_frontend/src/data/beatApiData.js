@@ -248,7 +248,8 @@ function normalizeBeat(report, routeDetails, index) {
         return house;
     });
 
-    const rawGeofence = firstValue(routeDetails, ["geofence", "Geofence", "GeoFence"]);
+    const rawGeofence = firstValue(report, ["geofence", "Geofence", "GeoFence"]) ??
+        firstValue(routeDetails, ["geofence", "Geofence", "GeoFence"]);
     const fencePolygons = parseGeofence(rawGeofence, `Beat ${beatId} geofence`);
     const fencePoints = fencePolygons[0];
     const routeHouseCoordinates = [];
