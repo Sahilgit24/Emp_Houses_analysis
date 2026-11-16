@@ -8,6 +8,8 @@ const sample = {
         FromDate: "2026-10-14T00:00:00+05:30",
         ToDate: "2026-10-16T00:00:00+05:30",
         TotalHouses: 3,
+        TotalScannedHouses: 2,
+        TotalNotScannedHouses: 1,
         ScannedHouses: [
             {
                 HouseId: "H1",
@@ -74,18 +76,22 @@ test("normalizes owner, other-employee, and remaining houses with stable IDs", (
     assert.equal(beat.houses[0].collectionStatus, "own");
     assert.equal(beat.houses[1].collectionStatus, "other");
     assert.equal(beat.houses[2].collectionStatus, "remaining");
+    assert.equal(beat.reportedTotalHouses, 3);
+    assert.equal(beat.totalScannedHouses, 2);
+    assert.equal(beat.totalNotScannedHouses, 1);
     assert.equal(beat.houses[0].isRouteHouse, true);
-    assert.equal(beat.houses[1].isRouteHouse, false);
+    assert.equal(beat.houses[1].isRouteHouse, true);
+    assert.equal(beat.routeHouseCoordinates.length, 3);
 });
 
-test("links route collection history by reference ID and computes intervals", () => {
+test("uses ScanningDates history and computes intervals without Collectionlist", () => {
     const [beat] = normalizeBeatApiPayload(sample).beats;
     const house = beat.houses.find((item) => item.houseId === "H1");
-    assert.deepEqual(house.history.collectionDates, ["2026-10-15", "2026-10-16"]);
-    assert.equal(house.history.collectionCount, 2);
-    assert.equal(house.history.typicalIntervalDays, 1);
+    assert.deepEqual(house.history.collectionDates, ["2026-10-16"]);
+    assert.equal(house.history.collectionCount, 1);
+    assert.equal(house.history.typicalIntervalDays, null);
     assert.equal(house.history.currentGapDays, 0);
-    assert.equal(beat.routes[1].collectionScans[0].houseId, "H1");
+    assert.deepEqual(beat.routes[1].collectionScans, []);
     assert.ok(beat.routes[1].distanceKm > 0);
 });
 
@@ -113,18 +119,34 @@ test("normalizes dump weight measurements from route records", () => {
     });
 });
 
-test("keeps route-linked history for houses listed as unscanned", () => {
-    const withRouteHistory = structuredClone(sample);
-    withRouteHistory.RouteDetails.routes[0].Collectionlist.push({
-        referanceId: "R3",
-        datetime: "2026-10-15T10:00:00+05:30",
-    });
+test("uses unique HouseIds and ignores RouteDetails houses and Collectionlist", () => {
+    const newFormat = structuredClone(sample);
+    newFormat.RouteDetails.houses = [{lat: "invalid", lon: "invalid"}];
+    newFormat.RouteDetails.routes[0].Collectionlist = [null];
 
-    const [beat] = normalizeBeatApiPayload(withRouteHistory).beats;
-    const house = beat.houses.find((item) => item.houseId === "H3");
-    assert.equal(house.collectionStatus, "remaining");
-    assert.deepEqual(house.history.collectionDates, ["2026-10-15"]);
-    assert.equal(house.history.collectionCount, 1);
+    const [beat] = normalizeBeatApiPayload(newFormat).beats;
+    assert.equal(beat.houses.length, 3);
+    assert.equal(beat.routeHouseCoordinates.length, 3);
+    assert.deepEqual(beat.routes[0].collectionScans, []);
+    assert.deepEqual(beat.houses.find((item) => item.houseId === "H3").history.collectionDates, []);
+});
+
+test("reads ScanningDates once per house and carries the row scanner to each date", () => {
+    const withScanningDates = structuredClone(sample);
+    withScanningDates.BeatWiseReport.ScannedHouses[0].ScanningDates = [
+        "2026-10-14T09:00:00+05:30",
+        "2026-10-15T09:00:00+05:30",
+        "2026-10-15T10:00:00+05:30",
+    ];
+
+    const [beat] = normalizeBeatApiPayload(withScanningDates).beats;
+    const house = beat.houses.find((item) => item.houseId === "H1");
+    assert.deepEqual(house.history.collectionDates, ["2026-10-14", "2026-10-15", "2026-10-16"]);
+    assert.deepEqual(
+        house.historyEvents.map((event) => event.scannerUserId),
+        ["7", "7", "7"],
+    );
+    assert.equal(house.history.collectionCount, 3);
 });
 
 test("keeps ScanningDate history even when the snapshot Scanned flag is false", () => {

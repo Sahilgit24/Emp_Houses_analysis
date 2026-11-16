@@ -2,16 +2,31 @@
 import "@/App.css";
 import BeatHouseRoutePlanner from "./Component/Map/BeatHouseRoutePlanner";
 import EmployeeApiDashboard from "./Component/EmployeeApiDashboard";
-import {useState} from "react";
+import {useMemo, useState} from "react";
 import {combineNormalizedBeatData, normalizeBeatApiPayload} from "./data/beatApiData.js";
+
+const LIVE_DATE = "live";
 
 export default function App() {
     const [activePlanner, setActivePlanner] = useState("route");
     const [beatData, setBeatData] = useState(null);
+    const [dateSelection, setDateSelection] = useState(LIVE_DATE);
     const [loadedSources, setLoadedSources] = useState([]);
     const [uploadError, setUploadError] = useState("");
     const [loadingFile, setLoadingFile] = useState(false);
     const [highPriorityHouseRequest, setHighPriorityHouseRequest] = useState(null);
+    const availableDates = useMemo(() => {
+        const dates = new Set();
+        (beatData?.beats || []).forEach((beat) => {
+            (beat.routes || []).forEach((route) => dates.add(route.date));
+            (beat.houses || []).forEach((house) => {
+                (house.history?.collectionDates || []).forEach((date) => dates.add(date));
+                if (house.scanningDate) dates.add(house.scanningDate.slice(0, 10));
+            });
+            if (beat.toDate) dates.add(beat.toDate);
+        });
+        return [...dates].filter((date) => /^\d{4}-\d{2}-\d{2}$/.test(date)).sort();
+    }, [beatData]);
 
     const handleShowHighPriorityHouses = (request) => {
         setHighPriorityHouseRequest(request);
@@ -104,6 +119,7 @@ export default function App() {
                                 setLoadedSources([]);
                                 setUploadError("");
                                 setHighPriorityHouseRequest(null);
+                                setDateSelection(LIVE_DATE);
                             }}
                             className="rounded border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100"
                         >
@@ -126,12 +142,18 @@ export default function App() {
                         visible={activePlanner === "route"}
                         beatData={beatData}
                         highPriorityHouseRequest={highPriorityHouseRequest}
+                        dateSelection={dateSelection}
+                        availableDates={availableDates}
+                        onDateSelectionChange={setDateSelection}
                     />
                 </div>
                 <div className={`h-full ${activePlanner === "analytics" ? "" : "hidden"}`}>
                     <EmployeeApiDashboard
                         beatData={beatData}
                         onShowHighPriorityHouses={handleShowHighPriorityHouses}
+                        dateSelection={dateSelection}
+                        availableDates={availableDates}
+                        onDateSelectionChange={setDateSelection}
                     />
                 </div>
             </main>

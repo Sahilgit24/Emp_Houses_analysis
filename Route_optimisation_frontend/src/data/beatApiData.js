@@ -183,7 +183,6 @@ function normalizeBeat(report, routeDetails, index) {
     if (!sourceRows.length) throw new Error(`Beat ${beatId} has no scanned or unscanned houses.`);
 
     const houseIds = new Set();
-    const references = new Map();
     const houses = sourceRows.map(({record, listedAsScanned}, rowIndex) => {
         if (!record || typeof record !== "object" || Array.isArray(record)) {
             throw new Error(`Beat ${beatId} house item ${rowIndex + 1} must be an object.`);
@@ -206,6 +205,10 @@ function normalizeBeat(report, routeDetails, index) {
         const scannerUserId = text(firstValue(record, ["ScannerUserId", "scannerUserId"]));
         const scannedValue = parseBoolean(firstValue(record, ["Scanned", "scanned"]));
         const scanned = scannedValue == null ? listedAsScanned : scannedValue;
+        const scanningDates = record.ScanningDates ?? record.scanningDates ?? [];
+        if (!Array.isArray(scanningDates)) {
+            throw new Error(`Beat ${beatId} HouseId ${houseId} ScanningDates must be an array.`);
+        }
         const collectionStatus = !scanned || !scannerUserId
             ? "remaining"
             : scannerUserId === ownerId ? "own" : "other";
@@ -228,56 +231,50 @@ function normalizeBeat(report, routeDetails, index) {
             historyEvents: [],
             raw: record,
         };
-        if (referenceId) {
-            const matches = references.get(referenceId) || [];
-            matches.push(house);
-            references.set(referenceId, matches);
-        }
+        const historyDates = new Set();
+        [...scanningDates, record.ScanningDate].forEach((value) => {
+            if (value == null || text(value) === "") return;
+            const date = parseDate(value, `House ${houseId} ScanningDates`);
+            if (historyDates.has(date)) return;
+            historyDates.add(date);
+            house.historyEvents.push({
+                date,
+                timestamp: text(value),
+                source: "house-record-history",
+                scannerUserId,
+                scannerName: house.scannerName,
+            });
+        });
         return house;
     });
-
-    const ambiguousReferenceIds = new Set(
-        [...references.entries()].filter(([, matches]) => matches.length > 1).map(([id]) => id),
-    );
-    const uniqueHouseByReference = new Map(
-        [...references.entries()].filter(([, matches]) => matches.length === 1)
-            .map(([id, matches]) => [id, matches[0]]),
-    );
 
     const rawGeofence = firstValue(routeDetails, ["geofence", "Geofence", "GeoFence"]);
     const fencePolygons = parseGeofence(rawGeofence, `Beat ${beatId} geofence`);
     const fencePoints = fencePolygons[0];
-    const rawRouteHouses = routeDetails.houses ?? routeDetails.Houses ?? [];
-    if (!Array.isArray(rawRouteHouses)) throw new Error(`Beat ${beatId} RouteDetails.houses must be an array.`);
     const routeHouseCoordinates = [];
     const routeCoordinateKeys = new Set();
-    const housesByCoordinate = new Map();
+    const coordinatesByKey = new Map();
     houses.forEach((house) => {
         if (!house.routeCoordinateKey) return;
-        const matchingHouses = housesByCoordinate.get(house.routeCoordinateKey) || [];
-        matchingHouses.push(house);
-        housesByCoordinate.set(house.routeCoordinateKey, matchingHouses);
-    });
-    let unmatchedRouteHouseCoordinates = 0;
-    rawRouteHouses.forEach((record, routeHouseIndex) => {
-        const point = parseCoordinate(
-            firstValue(record, ["lat", "Lat", "latitude", "Latitude"]),
-            firstValue(record, ["lon", "Lon", "lng", "Lng", "longitude", "Longitude"]),
-            `Beat ${beatId} RouteDetails house ${routeHouseIndex + 1}`,
-        );
-        const key = coordinateKey(point);
+        house.isRouteHouse = true;
+        const key = house.routeCoordinateKey;
         routeCoordinateKeys.add(key);
-        const matchingHouses = housesByCoordinate.get(key) || [];
-        if (!matchingHouses.length) unmatchedRouteHouseCoordinates += 1;
-        matchingHouses.forEach((house) => { house.isRouteHouse = true; });
-        routeHouseCoordinates.push({
-            route_key: `coordinate:${key}`,
-            coordinateKey: key,
-            lat: point.lat,
-            lon: point.lon,
-            houseIds: matchingHouses.map((house) => house.houseId),
-        });
+        const coordinate = coordinatesByKey.get(key);
+        if (coordinate) {
+            coordinate.houseIds.push(house.houseId);
+        } else {
+            const routeHouseCoordinate = {
+                route_key: `coordinate:${key}`,
+                coordinateKey: key,
+                lat: house.lat,
+                lon: house.lon,
+                houseIds: [house.houseId],
+            };
+            coordinatesByKey.set(key, routeHouseCoordinate);
+            routeHouseCoordinates.push(routeHouseCoordinate);
+        }
     });
+    const unmatchedRouteHouseCoordinates = 0;
 
     const rawDumpyards = routeDetails.dumpyards ?? routeDetails.Dumpyards ?? [];
     if (!Array.isArray(rawDumpyards)) throw new Error(`Beat ${beatId} RouteDetails.dumpyards must be an array.`);
@@ -296,7 +293,6 @@ function normalizeBeat(report, routeDetails, index) {
 
     const rawRoutes = routeDetails.routes ?? routeDetails.Routes ?? [];
     if (!Array.isArray(rawRoutes)) throw new Error(`Beat ${beatId} RouteDetails.routes must be an array.`);
-    const historyWarnings = {unmatchedCollectionRecords: 0, ambiguousReferenceRecords: 0};
     const routes = rawRoutes.map((record, routeIndex) => {
         if (!record || typeof record !== "object" || Array.isArray(record)) {
             throw new Error(`Beat ${beatId} route item ${routeIndex + 1} must be an object.`);
@@ -316,45 +312,6 @@ function normalizeBeat(report, routeDetails, index) {
             }
             return {...coordinate, datetime, timestamp: Date.parse(datetime)};
         }).sort((a, b) => a.timestamp - b.timestamp);
-
-        const rawScans = record.Collectionlist ?? record.collectionList ?? record.collectionlist ?? [];
-        if (!Array.isArray(rawScans)) throw new Error(`Beat ${beatId} Collectionlist on ${date} must be an array.`);
-        const collectionScans = rawScans.map((scan, scanIndex) => {
-            if (!scan || typeof scan !== "object" || Array.isArray(scan)) {
-                throw new Error(`Beat ${beatId} collection record ${scanIndex + 1} on ${date} must be an object.`);
-            }
-            const referenceId = text(firstValue(scan, [
-                "referanceId", "ReferanceId", "referenceId", "ReferenceId", "reference_id",
-            ]));
-            const pointLat = firstValue(scan, ["lat", "Lat", "latitude", "Latitude"]);
-            const pointLon = firstValue(scan, ["lon", "Lon", "lng", "Lng", "longitude", "Longitude"]);
-            const hasCoordinates = pointLat != null || pointLon != null;
-            const point = hasCoordinates
-                ? parseCoordinate(pointLat, pointLon, `Beat ${beatId} collection record ${scanIndex + 1} on ${date}`)
-                : {lat: null, lon: null};
-            const datetime = text(firstValue(scan, ["datetime", "DateTime", "timestamp", "Timestamp"])) || date;
-            if (!Number.isFinite(Date.parse(datetime))) {
-                throw new Error(`Beat ${beatId} collection record ${scanIndex + 1} on ${date} has an invalid timestamp.`);
-            }
-            const house = referenceId ? uniqueHouseByReference.get(referenceId) : null;
-            if (referenceId && ambiguousReferenceIds.has(referenceId)) {
-                historyWarnings.ambiguousReferenceRecords += 1;
-            } else if (referenceId && !house) {
-                historyWarnings.unmatchedCollectionRecords += 1;
-            }
-            if (house) {
-                house.historyEvents.push({date: parseDate(datetime, "Collection timestamp"), timestamp: datetime, source: "route"});
-            }
-            return {
-                plateId: referenceId || null,
-                houseId: house?.houseId || null,
-                lat: point.lat,
-                lon: point.lon,
-                datetime,
-                scannerName: text(firstValue(scan, ["ScannerName", "scannerName", "EmployeeName", "employeeName"])) || null,
-                scannerUserId: text(firstValue(scan, ["ScannerUserId", "scannerUserId"])) || null,
-            };
-        });
 
         const rawDumpEvents = record.dumplist ?? record.DumpList ?? record.dumpList ?? [];
         if (!Array.isArray(rawDumpEvents)) {
@@ -406,7 +363,7 @@ function normalizeBeat(report, routeDetails, index) {
         return {
             date,
             trackPoints,
-            collectionScans,
+            collectionScans: [],
             dumpEvents,
             distanceKm,
             durationMinutes: firstTimestamp == null || lastTimestamp == null
@@ -416,15 +373,6 @@ function normalizeBeat(report, routeDetails, index) {
     }).sort((a, b) => a.date.localeCompare(b.date));
 
     houses.forEach((house) => {
-        if (house.scanningDate) {
-            if (!Number.isFinite(Date.parse(house.scanningDate))) {
-                throw new Error(`House ${house.houseId} ScanningDate must contain a valid date or timestamp.`);
-            }
-            const date = parseDate(house.scanningDate, `House ${house.houseId} ScanningDate`);
-            if (!house.historyEvents.some((event) => event.date === date)) {
-                house.historyEvents.push({date, timestamp: house.scanningDate, source: "house-record"});
-            }
-        }
         house.historyEvents.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
         house.history = summarizeHistory(house.historyEvents, toDate, house.collectionStatus);
     });
@@ -466,7 +414,7 @@ function normalizeBeat(report, routeDetails, index) {
         dumpyards,
         routes,
         hasHouseIds: houses.every((house) => Boolean(house.houseId)),
-        historyWarnings,
+        historyWarnings: {unmatchedCollectionRecords: 0, ambiguousReferenceRecords: 0},
         raw: report,
     };
 }

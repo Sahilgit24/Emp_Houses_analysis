@@ -60,7 +60,7 @@ export function analyzeOutsideBeatCollections(routes, otherBeats, assignedEmploy
     routes.forEach((route) => {
         if (!dateInWindow(route.date, fromDate, toDate)) return;
         route.collectionScans.forEach((scan) => {
-            if (String(scan.scannerUserId || "") !== String(assignedEmployeeId || "") ||
+            if (String(scan.scannerUserId || assignedEmployeeId || "") !== String(assignedEmployeeId || "") ||
                 !assignedEmployeeId || scan.houseId) return;
             const matches = scan.plateId ? housesByReference.get(scan.plateId) || [] : [];
             if (matches.length !== 1) {
@@ -103,8 +103,9 @@ export function analyzeHouseCoverage(houses, routes, fromDate, toDate, assignedE
         selectedReferences.set(house.referenceId, matches);
     });
 
-    const addScan = (houseId, scan, date, beatName) => {
-        const scannerId = String(scan.scannerUserId || "");
+    const addScan = (houseId, scan, date, beatName, defaultScannerId = "", defaultScannerName = null) => {
+        const hasScannerId = Boolean(scan.scannerUserId);
+        const scannerId = String(scan.scannerUserId || defaultScannerId || "");
         const events = scansByHouse.get(houseId) || [];
         events.push({
             date,
@@ -112,9 +113,11 @@ export function analyzeHouseCoverage(houses, routes, fromDate, toDate, assignedE
                 ? Date.parse(scan.datetime)
                 : Date.parse(`${date}T00:00:00Z`),
             scannerId,
-            scannerName: scan.scannerName || (scannerId === assignedEmployeeId
-                ? assignedEmployeeName
-                : scannerId ? `Employee ${scannerId}` : null),
+            scannerName: scan.scannerName || (hasScannerId
+                ? scannerId === assignedEmployeeId ? assignedEmployeeName : `Employee ${scannerId}`
+                : defaultScannerName || (scannerId === assignedEmployeeId
+                    ? assignedEmployeeName
+                    : scannerId ? `Employee ${scannerId}` : null)),
             beatName,
         });
         scansByHouse.set(houseId, events);
@@ -123,17 +126,36 @@ export function analyzeHouseCoverage(houses, routes, fromDate, toDate, assignedE
     routes.forEach((route) => {
         if (!dateInWindow(route.date, fromDate, toDate)) return;
         route.collectionScans.forEach((scan) => {
-            if (scan.houseId) addScan(scan.houseId, scan, route.date, null);
+            if (scan.houseId) {
+                addScan(
+                    scan.houseId,
+                    scan,
+                    route.date,
+                    null,
+                    assignedEmployeeId,
+                    assignedEmployeeName,
+                );
+            }
         });
     });
 
     otherBeats.forEach((otherBeat) => {
+        const otherEmployeeId = String(otherBeat.assignedEmployee?.id || otherBeat.beatUserId || "");
+        const otherEmployeeName = otherBeat.assignedEmployee?.name ||
+            (otherEmployeeId ? `Employee ${otherEmployeeId}` : null);
         otherBeat.routes.forEach((route) => {
             if (!dateInWindow(route.date, fromDate, toDate)) return;
             route.collectionScans.forEach((scan) => {
                 const matches = scan.plateId ? selectedReferences.get(scan.plateId) || [] : [];
                 if (matches.length === 1) {
-                    addScan(matches[0], scan, route.date, otherBeat.beatName);
+                    addScan(
+                        matches[0],
+                        scan,
+                        route.date,
+                        otherBeat.beatName,
+                        otherEmployeeId,
+                        otherEmployeeName,
+                    );
                 }
             });
         });
@@ -150,10 +172,23 @@ export function analyzeHouseCoverage(houses, routes, fromDate, toDate, assignedE
         const snapshotScannerId = String(house.scannerUserId || "");
 
         const events = [...routeEvents];
-        if (snapshotIsInWindow && snapshotScannerId &&
-            !routeEvents.some((event) =>
-                event.date === snapshotDate && event.scannerId === snapshotScannerId
-            )) {
+        const eventDates = new Set(routeEvents.map((event) => event.date));
+        (house.historyEvents || []).forEach((historyEvent) => {
+            if (historyEvent.source !== "house-record-history" ||
+                !dateInWindow(historyEvent.date, fromDate, toDate) ||
+                eventDates.has(historyEvent.date)) return;
+            eventDates.add(historyEvent.date);
+            events.push({
+                date: historyEvent.date,
+                timestamp: Number.isFinite(Date.parse(historyEvent.timestamp))
+                    ? Date.parse(historyEvent.timestamp)
+                    : Date.parse(`${historyEvent.date}T00:00:00Z`),
+                scannerId: String(historyEvent.scannerUserId || ""),
+                scannerName: historyEvent.scannerName || null,
+                beatName: null,
+            });
+        });
+        if (snapshotIsInWindow && snapshotScannerId && !eventDates.has(snapshotDate)) {
             events.push({
                 date: snapshotDate,
                 timestamp: Number.isFinite(snapshotTimestamp)
@@ -297,4 +332,128 @@ export function getHighPriorityHouses(coverage, reportWindowDays) {
             return (b.daysSinceScan ?? 0) - (a.daysSinceScan ?? 0) ||
                 a.detail.house.houseId.localeCompare(b.detail.house.houseId);
         });
+}
+
+function lastScanOnOrBefore(detail, endDate) {
+    const dates = [
+        ...(detail.house.history?.collectionDates || []),
+        detail.house.scanningDate?.slice(0, 10),
+        detail.lastRecordedDate,
+    ].filter((date) => date && (!endDate || date <= endDate));
+    return dates.sort().at(-1) || null;
+}
+
+export function getNextCollectionPriorities(coverage, reportWindowDays, endDate, highPriorityHouses = []) {
+    const highPriorityHouseIds = new Set(
+        highPriorityHouses.map(({detail}) => detail.house.houseId),
+    );
+    return coverage.details.map((detail) => {
+        const lastScannedDate = lastScanOnOrBefore(detail, endDate);
+        const daysSinceScan = daysSince(lastScannedDate, endDate);
+        const neverScanned = !detail.house.history?.collectionDates?.length &&
+            !detail.house.scanningDate;
+        const noScanByDate = !lastScannedDate;
+        const existingHighPriority = highPriorityHouseIds.has(detail.house.houseId);
+        const longGap = daysSinceScan != null && daysSinceScan >= 7;
+        const recurringLongGaps = detail.repeatedLongGaps >= 2;
+        const priority = neverScanned || noScanByDate || existingHighPriority || longGap ||
+            detail.isLowFrequency || recurringLongGaps ||
+            detail.status === "Overdue" || detail.status === "Needs Attention";
+        if (!priority) return null;
+
+        const priorityLabel = neverScanned
+            ? "Highest — no scan history"
+            : noScanByDate
+                ? "High — no scan by selected date"
+                : existingHighPriority || longGap || detail.status === "Overdue"
+                    ? "High — existing priority status"
+                : recurringLongGaps || detail.status === "Needs Attention"
+                    ? "Medium — recurring gaps"
+                    : "Medium — low frequency";
+        const reason = neverScanned
+            ? "No collection scan history is available for this house."
+            : noScanByDate
+                ? "No scan was recorded on or before the selected analysis date."
+                : (existingHighPriority || longGap) && daysSinceScan != null
+                ? `${formatElapsedDays(daysSinceScan)} since its last recorded scan.`
+                : detail.attentionReason;
+
+        return {
+            detail,
+            lastScannedDate,
+            daysSinceScan,
+            priorityLabel,
+            reason,
+            frequency: detail.recordedScanCount === 0
+                ? reportWindowDays == null
+                    ? "No scans in the reporting window"
+                    : `No scans in the ${formatElapsedDays(reportWindowDays)} reporting window`
+                : `${detail.recordedScanCount} scans across ${detail.collectionDays} collection days`,
+            priorityRank: neverScanned ? 5
+                : noScanByDate ? 4
+                    : existingHighPriority || longGap || detail.status === "Overdue" ? 3
+                    : recurringLongGaps || detail.status === "Needs Attention" ? 2 : 1,
+        };
+    }).filter(Boolean).sort((a, b) =>
+        b.priorityRank - a.priorityRank ||
+        (b.daysSinceScan ?? -1) - (a.daysSinceScan ?? -1) ||
+        b.detail.repeatedLongGaps - a.detail.repeatedLongGaps ||
+        a.detail.house.houseId.localeCompare(b.detail.house.houseId)
+    );
+}
+
+export function getCoverageTrend(previousCoverage, currentCoverage, totalHouses) {
+    const getPercent = (coverage) => coverage?.collectedAtLeastOnce > 0 && totalHouses > 0
+        ? coverage.collectedAtLeastOnce * 100 / totalHouses
+        : null;
+    const previousPercent = getPercent(previousCoverage);
+    const currentPercent = getPercent(currentCoverage);
+    if (previousPercent == null || currentPercent == null) {
+        return {
+            previousPercent,
+            currentPercent,
+            changePercentagePoints: null,
+            trend: "Insufficient data",
+        };
+    }
+
+    const changePercentagePoints = currentPercent - previousPercent;
+    return {
+        previousPercent,
+        currentPercent,
+        changePercentagePoints,
+        trend: changePercentagePoints > 0
+            ? "Improving"
+            : changePercentagePoints < 0
+                ? "Declining"
+                : "Stable",
+    };
+}
+
+export function summarizeCollectionPatterns(coverage) {
+    const details = coverage.details || [];
+    const activityByMonth = new Map();
+    details.forEach((detail) => {
+        detail.collectionDates.forEach((date) => {
+            const month = date.slice(0, 7);
+            activityByMonth.set(month, (activityByMonth.get(month) || 0) + 1);
+        });
+    });
+    const busiestMonth = activityByMonth.size < 2
+        ? null
+        : [...activityByMonth.entries()]
+            .sort(([monthA, countA], [monthB, countB]) =>
+                countB - countA || monthA.localeCompare(monthB)
+            )[0];
+
+    return {
+        repeatedlyCollected: details.filter((detail) => detail.collectionDays > 1).length,
+        lowFrequency: details.filter((detail) => detail.isLowFrequency).length,
+        recurringLongGaps: details.filter((detail) => detail.repeatedLongGaps >= 2).length,
+        noRecordedCollection: details.filter((detail) => detail.collectionDays === 0).length,
+        busiestMonth: busiestMonth
+            ? {month: busiestMonth[0], houseDays: busiestMonth[1]}
+            : null,
+        recordedHouseDays: [...activityByMonth.values()].reduce((total, count) => total + count, 0),
+    };
 }

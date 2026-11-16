@@ -232,11 +232,21 @@ function getOutsideBeatSections(routePath, polygon) {
 
 function getCollectedHouseIds(beat, day) {
     if (!beat?.hasHouseIds || !day) return new Set();
+    const scannedHouseIds = new Set(day.collectionScans.map((scan) => scan.houseId).filter(Boolean));
     const scannedPlateIds = new Set(day.collectionScans.map((scan) => scan.plateId).filter(Boolean));
     return new Set(beat.houses
-        .filter((house) => scannedPlateIds.has(house.house_id) ||
-            (house.master_plate_id && scannedPlateIds.has(house.master_plate_id)))
+        .filter((house) => scannedHouseIds.has(house.house_id) ||
+            scannedPlateIds.has(house.house_id) ||
+            (house.master_plate_id && scannedPlateIds.has(house.master_plate_id)) ||
+            house.history?.collectionDates?.includes(day.date))
         .map((house) => house.house_id));
+}
+
+function getHouseCollectionStatusForDate(house, date, assignedEmployeeId) {
+    if (!house?.history?.collectionDates?.includes(date)) return "remaining";
+    const scannerUserId = String(house.scannerUserId || "");
+    if (!scannerUserId) return "remaining";
+    return scannerUserId === String(assignedEmployeeId || "") ? "own" : "other";
 }
 
 function sampleTrackPoints(points, maxPoints) {
@@ -425,6 +435,7 @@ function BeatRouteMap({
     trackPoints,
     layer,
     visible,
+    selectedDate,
     nearRouteThreshold,
     coveredHouseIds,
     showCollectedOnly,
@@ -507,7 +518,14 @@ function BeatRouteMap({
     const houseFeatureData = useMemo(() => ({
         type: "FeatureCollection",
         features: houseEntries.map(({house, beat: houseBeat}) => {
-            const categoryColor = HOUSE_STATUS_STYLES[house.collectionStatus];
+            const collectionStatus = selectedDate
+                ? getHouseCollectionStatusForDate(
+                    house,
+                    selectedDate,
+                    houseBeat.assignedEmployee?.id || houseBeat.beatUserId,
+                )
+                : house.collectionStatus;
+            const categoryColor = HOUSE_STATUS_STYLES[collectionStatus];
             const attentionDetail = attentionDetailsByBeat.get(houseBeat.id)?.get(house.house_id);
             const includedInPlan = plannedHouseKeys.has(house.route_key);
             const collectedToday = house.house_id != null && coveredHouseIds.has(house.house_id);
@@ -518,7 +536,7 @@ function BeatRouteMap({
                         ? `House ID: ${house.house_id}`
                         : "House ID unavailable; coordinate-only candidate",
                     `${house.lat.toFixed(6)}, ${house.lon.toFixed(6)}`,
-                    `Reported status: ${categoryColor.label}`,
+                    `Status on ${selectedDate}: ${categoryColor.label}`,
                     ...(attentionDetail
                         ? [`Collection attention: ${attentionDetail.attentionReason}`]
                         : []),
@@ -540,7 +558,7 @@ function BeatRouteMap({
                 : [
                     `Beat: ${houseBeat.beatName}`,
                     house.house_id ? `House ID: ${house.house_id}` : "House ID unavailable",
-                    categoryColor.label,
+                    `Status on ${selectedDate}: ${categoryColor.label}`,
                     ...(attentionDetail
                         ? [`Collection attention: ${attentionDetail.attentionReason}`]
                         : []),
@@ -558,7 +576,7 @@ function BeatRouteMap({
                     popupLines,
                     statusIcon: showHighPriorityOnly && highPriorityHouseIds.has(house.house_id)
                         ? "attention"
-                        : house.collectionStatus,
+                        : collectionStatus,
                 },
             };
         }),
@@ -571,6 +589,7 @@ function BeatRouteMap({
         houseEntries,
         optimizationCandidateHouseIds,
         plannedHouseKeys,
+        selectedDate,
         showHighPriorityOnly,
     ]);
     const vehiclePosition = getRoutePosition(playbackPath, progress);
@@ -850,8 +869,10 @@ export default function BeatHouseRoutePlanner({
     visible = true,
     beatData,
     highPriorityHouseRequest,
+    dateSelection = "live",
+    availableDates = [],
+    onDateSelectionChange,
 }) {
-    const [selectedDate, setSelectedDate] = useState("");
     const [selectedBeatId, setSelectedBeatId] = useState("");
     const [selectedEmployeeKey, setSelectedEmployeeKey] = useState(ALL_EMPLOYEES);
     const [layer, setLayer] = useState("streets");
@@ -913,6 +934,26 @@ export default function BeatHouseRoutePlanner({
             ? (!selectedBeatId || employee.beatId === selectedBeatId)
             : employee.mappingId.toLowerCase() === selectedEmployeeKey.toLowerCase()
     ), [employees, selectedBeatId, selectedEmployeeKey]);
+    const dateScopeBeats = useMemo(() => selectedEmployee
+        ? beatFiles.filter((item) => item.id === selectedEmployee.beatId)
+        : selectedBeatId
+            ? beatFiles.filter((item) => item.id === selectedBeatId)
+            : beatFiles, [beatFiles, selectedBeatId, selectedEmployee]);
+    const scopedDateOptions = useMemo(() => {
+        const dates = new Set();
+        dateScopeBeats.forEach((item) => {
+            (item.routes || []).forEach((route) => dates.add(route.date));
+            (item.houses || []).forEach((house) => {
+                (house.history?.collectionDates || []).forEach((date) => dates.add(date));
+                if (house.scanningDate) dates.add(house.scanningDate.slice(0, 10));
+            });
+            if (item.toDate) dates.add(item.toDate);
+        });
+        return [...dates].sort();
+    }, [dateScopeBeats]);
+    const selectedDate = dateSelection === "live"
+        ? scopedDateOptions.at(-1) || availableDates.at(-1) || ""
+        : dateSelection;
     const employeeRouteLayers = useMemo(() =>
         employeesInScope.flatMap((employee) => {
             const routeDay = employee.days.find((item) => item.date === selectedDate);
@@ -957,7 +998,27 @@ export default function BeatHouseRoutePlanner({
                     distanceKm: employeeDays.reduce((total, item) => total + item.distanceKm, 0),
                 };
             }), [employeesInScope, selectedEmployee]);
-    const day = days.find((item) => item.date === selectedDate) || null;
+    const day = useMemo(
+        () => days.find((item) => item.date === selectedDate) || (selectedDate ? {
+            date: selectedDate,
+            trackPoints: [],
+            collectionScans: [],
+            distanceKm: 0,
+        } : null),
+        [days, selectedDate],
+    );
+    const selectedDateCoverage = useMemo(
+        () => beat && selectedDate
+            ? analyzeHouseCoverage(
+                beat.houses,
+                [],
+                selectedDate,
+                selectedDate,
+                beat.assignedEmployee,
+            )
+            : null,
+        [beat, selectedDate],
+    );
     const selectedRoute = routes.find((route) => route.route_id === selectedRouteId) || null;
     const collectionMappingAvailable = Boolean(beat?.hasHouseIds && day);
     const coveredHouseIds = useMemo(() => getCollectedHouseIds(beat, day), [beat, day]);
@@ -989,10 +1050,11 @@ export default function BeatHouseRoutePlanner({
         () => Boolean(
             selectedHouse?.beat &&
             selectedHouse?.house.house_id &&
-            selectedHouseRoute &&
-            getCollectedHouseIds(selectedHouse.beat, selectedHouseRoute).has(selectedHouse.house.house_id)
+            (selectedHouseRoute
+                ? getCollectedHouseIds(selectedHouse.beat, selectedHouseRoute).has(selectedHouse.house.house_id)
+                : selectedHouse.house.history?.collectionDates?.includes(selectedDate))
         ),
-        [selectedHouse, selectedHouseRoute],
+        [selectedDate, selectedHouse, selectedHouseRoute],
     );
     const historicalOutsideBeat = useMemo(
         () => getOutsideBeatSections(recordedRoute?.route_path, beat?.fencePolygons || beat?.fencePoints),
@@ -1030,7 +1092,6 @@ export default function BeatHouseRoutePlanner({
     const housesOnSelectedDayRoute = useMemo(() => {
         if (!day?.trackPoints.length) return [];
         return routeCandidateHouses.filter((house) =>
-            house.collectionStatus === "remaining" &&
             !coveredHouseIds.has(house.house_id) &&
             distanceFromRouteIndexMeters(house, routeDistanceIndex) <= routeCorridorMeters
         );
@@ -1055,7 +1116,6 @@ export default function BeatHouseRoutePlanner({
         if (!beatFiles.length) {
             setSelectedBeatId("");
             setSelectedEmployeeKey(ALL_EMPLOYEES);
-            setSelectedDate("");
             setShowCollectedOnly(false);
             setShowHighPriorityOnly(false);
             setHighPriorityHouseIds(new Set());
@@ -1067,7 +1127,6 @@ export default function BeatHouseRoutePlanner({
         const firstBeat = beatFiles[0];
         setSelectedBeatId(firstBeat.id);
         setSelectedEmployeeKey(firstBeat.id);
-        setSelectedDate(firstBeat.routes.at(-1)?.date || "");
         setShowCollectedOnly(false);
         setShowHighPriorityOnly(false);
         setHighPriorityHouseIds(new Set());
@@ -1090,7 +1149,6 @@ export default function BeatHouseRoutePlanner({
         }
         setSelectedBeatId(targetBeat.id);
         setSelectedEmployeeKey(targetBeat.id);
-        setSelectedDate(targetBeat.routes.at(-1)?.date || "");
         setShowCollectedOnly(false);
         setHighPriorityHouseIds(nextHighPriorityHouseIds);
         setShowHighPriorityOnly(true);
@@ -1100,13 +1158,6 @@ export default function BeatHouseRoutePlanner({
         setError("");
         setNotice(`Showing ${nextHighPriorityHouseIds.size.toLocaleString()} high-priority houses in ${targetBeat.beatName}.`);
     }, [highPriorityHouseRequest, beatFiles]);
-
-    React.useEffect(() => {
-        if (!days.length) return;
-        if (!days.some((item) => item.date === selectedDate)) {
-            setSelectedDate(days[days.length - 1].date);
-        }
-    }, [days, selectedDate]);
 
     const clearResults = () => {
         setRoutes([]);
@@ -1302,16 +1353,12 @@ export default function BeatHouseRoutePlanner({
                                             setNotice("");
                                             return;
                                         }
-                                        const employee = employees.find((item) => item.mappingId === employeeKey);
                                         const mapping = activeEmployees.find((item) => item.id === employeeKey);
                                         setSelectedEmployeeKey(employeeKey);
                                         if (mapping?.beatId) setSelectedBeatId(mapping.beatId);
                                         setShowCollectedOnly(false);
                                         setShowHighPriorityOnly(false);
                                         setHighPriorityHouseIds(new Set());
-                                        const latestDayWithGps = [...(employee?.days || [])].reverse()
-                                            .find((item) => item.trackPoints.length > 0);
-                                        if (latestDayWithGps) setSelectedDate(latestDayWithGps.date);
                                         clearResults();
                                         setError("");
                                         setNotice("");
@@ -1327,19 +1374,26 @@ export default function BeatHouseRoutePlanner({
                                 </select>
                             </label>
                         )}
-                        {days.length > 0 && (
+                        {availableDates.length > 0 && (
                             <label className="flex flex-col gap-1 text-sm font-medium text-slate-700">
                                 {selectedEmployee ? "Employee route date" : "Route date"}
-                                <select value={selectedDate} onChange={(event) => {
-                                    setSelectedDate(event.target.value);
+                                <select value={dateSelection} onChange={(event) => {
+                                    onDateSelectionChange?.(event.target.value);
                                     setShowCollectedOnly(false);
                                     clearResults();
                                     setError("");
                                     setNotice("");
                                 }} className="rounded border border-slate-300 bg-white p-2">
-                                    {days.map((item, index) => (
-                                        <option key={`${item.date}-${index}`} value={item.date}>
-                                            {item.date}{item.trackPoints.length === 0 ? " (no GPS points)" : ""}
+                                    <option value="live">
+                                        Live date{scopedDateOptions.at(-1) ? ` (${scopedDateOptions.at(-1)})` : ""}
+                                    </option>
+                                    {availableDates.map((date) => (
+                                        <option key={date} value={date}>
+                                            {date}{!days.some((item) => item.date === date)
+                                                ? " (no route record)"
+                                                : days.find((item) => item.date === date)?.trackPoints.length
+                                                    ? ""
+                                                    : " (no GPS points)"}
                                         </option>
                                     ))}
                                 </select>
@@ -1467,9 +1521,9 @@ export default function BeatHouseRoutePlanner({
                             <div className="rounded border border-slate-200 p-2"><strong>Assigned employee:</strong> {beat.assignedEmployee.name} ({beat.beatUserId})</div>
                             <div className="rounded border border-slate-200 p-2"><strong>Total houses:</strong> {beat.totalHouses.toLocaleString()}</div>
                             <div className="rounded border border-slate-200 p-2"><strong>Data period:</strong> {beat.fromDate || "Unavailable"} – {beat.toDate || "Unavailable"}</div>
-                            <div className="rounded border border-slate-200 p-2"><strong>Collected by assigned employee:</strong> {beat.classificationCounts.own.toLocaleString()}</div>
-                            <div className="rounded border border-slate-200 p-2"><strong>Collected by other employee:</strong> {beat.classificationCounts.other.toLocaleString()}</div>
-                            <div className="rounded border border-slate-200 p-2"><strong>Remaining / not recorded collected:</strong> {beat.classificationCounts.remaining.toLocaleString()}</div>
+                            <div className="rounded border border-slate-200 p-2"><strong>Collected by assigned employee on selected date:</strong> {selectedDateCoverage ? selectedDateCoverage.assignedEmployeeCollected.toLocaleString() : "—"}</div>
+                            <div className="rounded border border-slate-200 p-2"><strong>Collected by other employees on selected date:</strong> {selectedDateCoverage ? selectedDateCoverage.otherEmployeeCollected.toLocaleString() : "—"}</div>
+                            <div className="rounded border border-slate-200 p-2"><strong>Not scanned on selected date:</strong> {selectedDateCoverage ? selectedDateCoverage.remainingWithoutHistory.toLocaleString() : "—"}</div>
                             <div className="rounded border border-slate-200 p-2">
                                 <strong>Beat geofence:</strong> {beat.fencePolygons.length} polygon(s), {beat.fencePolygons.reduce((count, polygon) => count + polygon.length, 0).toLocaleString()} points
                             </div>
@@ -1512,16 +1566,16 @@ export default function BeatHouseRoutePlanner({
                         {beat && <div className="mt-1 text-xs text-slate-500">{routeCandidateHouses.length.toLocaleString()} route-coordinate houses</div>}
                     </div>
                     <div className="rounded-xl bg-white p-4 shadow-sm">
-                        <div className="text-sm text-slate-500">Collected by assigned employee</div>
-                        <div className="mt-1 text-lg font-semibold">{beat ? beat.classificationCounts.own.toLocaleString() : "—"}</div>
+                        <div className="text-sm text-slate-500">Collected by assigned employee on selected date</div>
+                        <div className="mt-1 text-lg font-semibold">{selectedDateCoverage ? selectedDateCoverage.assignedEmployeeCollected.toLocaleString() : "—"}</div>
                     </div>
                     <div className="rounded-xl bg-white p-4 shadow-sm">
-                        <div className="text-sm text-slate-500">Collected by other employee</div>
-                        <div className="mt-1 text-lg font-semibold">{beat ? beat.classificationCounts.other.toLocaleString() : "—"}</div>
+                        <div className="text-sm text-slate-500">Collected by other employees on selected date</div>
+                        <div className="mt-1 text-lg font-semibold">{selectedDateCoverage ? selectedDateCoverage.otherEmployeeCollected.toLocaleString() : "—"}</div>
                     </div>
                     <div className="rounded-xl bg-white p-4 shadow-sm">
-                        <div className="text-sm text-slate-500">Remaining / not recorded collected</div>
-                        <div className="mt-1 text-lg font-semibold">{beat ? beat.classificationCounts.remaining.toLocaleString() : "—"}</div>
+                        <div className="text-sm text-slate-500">Not scanned on selected date</div>
+                        <div className="mt-1 text-lg font-semibold">{selectedDateCoverage ? selectedDateCoverage.remainingWithoutHistory.toLocaleString() : "—"}</div>
                         {beat && <div className="mt-1 text-xs text-slate-500">{housesOnSelectedDayRoute.length.toLocaleString()} near-route optimization candidates</div>}
                     </div>
                 </section>
@@ -1651,7 +1705,11 @@ export default function BeatHouseRoutePlanner({
                             <div role="status" className="mt-3 flex flex-wrap items-start justify-between gap-3 rounded border border-blue-200 bg-blue-50 p-3 text-sm text-slate-800">
                                 <div>
                                     <strong>{selectedHouse.house.house_id || "House"} · {selectedHouse.beat.beatName}</strong>
-                                    <div>Report status: {HOUSE_STATUS_STYLES[selectedHouse.house.collectionStatus].label}</div>
+                                    <div>Status on {selectedDate}: {HOUSE_STATUS_STYLES[getHouseCollectionStatusForDate(
+                                        selectedHouse.house,
+                                        selectedDate,
+                                        selectedHouse.beat.assignedEmployee?.id || selectedHouse.beat.beatUserId,
+                                    )].label}</div>
                                     <div>Scanner: {selectedHouse.house.scannerName || "Unavailable"} ({selectedHouse.house.scannerUserId || "ID unavailable"})</div>
                                     <div>Scanning date: {selectedHouse.house.scanningDate || "Not recorded"}</div>
                                     <div>
@@ -1659,7 +1717,9 @@ export default function BeatHouseRoutePlanner({
                                             ? selectedHouseCollectedOnDate
                                                 ? `Matched to a collection scan on ${selectedDate}`
                                                 : `No matched collection scan on ${selectedDate}`
-                                            : `No route record for ${selectedDate}`}
+                                            : selectedHouseCollectedOnDate
+                                                ? `House report shows a scan on ${selectedDate}; no route record was provided`
+                                                : `No route record for ${selectedDate}`}
                                     </div>
                                 </div>
                                 <button
@@ -1697,6 +1757,7 @@ export default function BeatHouseRoutePlanner({
                                 trackPoints={selectedEmployee ? day?.trackPoints || [] : []}
                                 layer={layer}
                                 visible={visible}
+                                selectedDate={selectedDate}
                                 nearRouteThreshold={Math.max(0, Number(nearRouteThreshold) || 0)}
                                 coveredHouseIds={coveredHouseIds}
                                 showCollectedOnly={showCollectedOnly}

@@ -5,6 +5,9 @@ import {
     analyzeOutsideBeatCollections,
     getReportWindowDays,
     getHighPriorityHouses,
+    getNextCollectionPriorities,
+    getCoverageTrend,
+    summarizeCollectionPatterns,
 } from "../src/data/employeePerformance.js";
 
 test("uses the selected reporting window for house collection history", () => {
@@ -43,6 +46,8 @@ test("uses the selected reporting window for house collection history", () => {
     assert.equal(coverage.details.find((item) => item.house.houseId === "H001").recordedScanCount, 4);
     assert.equal(coverage.details.find((item) => item.house.houseId === "H001").collectionDays, 3);
     assert.equal(coverage.details.find((item) => item.house.houseId === "H002").collectionCategory, "own");
+    assert.equal(coverage.details.find((item) => item.house.houseId === "H001").collectionCategory, "own");
+    assert.equal(coverage.details.find((item) => item.house.houseId === "H001").assignedEmployeeScanCount, 3);
     assert.equal(coverage.details.find((item) => item.house.houseId === "H004").recordedScanCount, 0);
     assert.equal(coverage.details.find((item) => item.house.houseId === "H004").status, "Not Collected");
     assert.deepEqual(
@@ -50,6 +55,40 @@ test("uses the selected reporting window for house collection history", () => {
         ["H002", "H003", "H004"],
     );
     assert.deepEqual(getHighPriorityHouses(coverage, 3), []);
+});
+
+test("attributes ScanningDates to each house's ScannerUserId within the selected date", () => {
+    const houses = [{
+        houseId: "own",
+        scannerUserId: "assigned-user",
+        history: {collectionDates: ["2026-10-01", "2026-10-02"]},
+        historyEvents: [
+            {date: "2026-10-01", timestamp: "2026-10-01", source: "house-record-history", scannerUserId: "assigned-user"},
+            {date: "2026-10-02", timestamp: "2026-10-02", source: "house-record-history", scannerUserId: "assigned-user"},
+        ],
+    }, {
+        houseId: "other",
+        scannerUserId: "other-user",
+        history: {collectionDates: ["2026-10-01"]},
+        historyEvents: [
+            {date: "2026-10-01", timestamp: "2026-10-01", source: "house-record-history", scannerUserId: "other-user"},
+        ],
+    }, {
+        houseId: "unscanned",
+        history: {collectionDates: []},
+        historyEvents: [],
+    }];
+    const coverage = analyzeHouseCoverage(
+        houses,
+        [],
+        "2026-10-01",
+        "2026-10-01",
+        {id: "assigned-user", name: "Assigned worker"},
+    );
+
+    assert.equal(coverage.assignedEmployeeCollected, 1);
+    assert.equal(coverage.otherEmployeeCollected, 1);
+    assert.equal(coverage.remainingWithoutHistory, 1);
 });
 
 test("keeps employee, other-employee, and unverified house scans in separate categories", () => {
@@ -78,7 +117,6 @@ test("keeps employee, other-employee, and unverified house scans in separate cat
         collectionScans: [
             {houseId: "own", scannerUserId: "assigned-user"},
             {houseId: "own", scannerUserId: "assigned-user"},
-            {houseId: "unknown"},
         ],
     }, {
         date: "2026-10-03",
@@ -107,7 +145,7 @@ test("keeps employee, other-employee, and unverified house scans in separate cat
     assert.equal(otherDetail.collectionCategory, "other");
     assert.equal(otherDetail.otherEmployeeScanCount, 3);
     assert.equal(otherDetail.latestScannerName, "Other collector");
-    assert.equal(coverage.details.find((item) => item.house.houseId === "unknown").recordedScanCount, 2);
+    assert.equal(coverage.details.find((item) => item.house.houseId === "unknown").recordedScanCount, 1);
     assert.equal(coverage.details.find((item) => item.house.houseId === "unknown").collectionCategory, "remaining");
     assert.equal(
         coverage.assignedEmployeeCollected + coverage.otherEmployeeCollected + coverage.notCollected,
@@ -115,7 +153,31 @@ test("keeps employee, other-employee, and unverified house scans in separate cat
     );
 });
 
-test("counts outside-Beat houses only when the scan belongs to the assigned employee", () => {
+test("attributes route collection records without scanner IDs to the route's assigned employee", () => {
+    const coverage = analyzeHouseCoverage([{
+        houseId: "H-other",
+        referenceId: "R-other",
+        history: {collectionDates: []},
+    }], [], "2026-10-01", "2026-10-03", {id: "assigned-user"}, [{
+        id: "other-beat",
+        beatUserId: "other-user",
+        assignedEmployee: {id: "other-user", name: "Other employee"},
+        beatName: "Other Beat",
+        houses: [],
+        routes: [{
+            date: "2026-10-02",
+            collectionScans: [{plateId: "R-other", datetime: "2026-10-02T09:00:00Z"}],
+        }],
+    }]);
+
+    const detail = coverage.details[0];
+    assert.equal(detail.collectionCategory, "other");
+    assert.equal(detail.otherEmployeeScanCount, 1);
+    assert.equal(detail.latestScannerName, "Other employee");
+    assert.equal(coverage.otherEmployeeCollected, 1);
+});
+
+test("attributes route collections to the assigned employee when scanner IDs are missing", () => {
     const analysis = analyzeOutsideBeatCollections([{
         date: "2026-10-01",
         collectionScans: [
@@ -200,4 +262,82 @@ test("does not mark a house with a recent scan as high priority or infer a full 
 
     assert.deepEqual(getHighPriorityHouses(recentScanCoverage, 30), []);
     assert.deepEqual(getHighPriorityHouses(shortWindowCoverage, 3), []);
+});
+
+test("builds next-collection priorities from existing history and attention status", () => {
+    const coverage = analyzeHouseCoverage([{
+        houseId: "never-scanned",
+        history: {collectionDates: []},
+    }, {
+        houseId: "long-gap",
+        history: {collectionDates: ["2026-10-01"]},
+    }, {
+        houseId: "recent",
+        history: {collectionDates: ["2026-10-09"]},
+    }], [], "2026-10-08", "2026-10-10", {id: "assigned-user"});
+    const existingHighPriority = getHighPriorityHouses(coverage, 3);
+    assert.deepEqual(existingHighPriority, []);
+    const priorities = getNextCollectionPriorities(
+        coverage,
+        3,
+        "2026-10-10",
+        existingHighPriority,
+    );
+
+    assert.deepEqual(
+        priorities.map((item) => item.detail.house.houseId),
+        ["never-scanned", "long-gap"],
+    );
+    assert.equal(priorities[0].priorityLabel, "Highest — no scan history");
+    assert.equal(priorities[0].lastScannedDate, null);
+    assert.equal(priorities[1].daysSinceScan, 9);
+    assert.equal(priorities[1].lastScannedDate, "2026-10-01");
+});
+
+test("coverage trend compares verified windows and reports insufficient data", () => {
+    assert.deepEqual(
+        getCoverageTrend({collectedAtLeastOnce: 1}, {collectedAtLeastOnce: 2}, 4),
+        {
+            previousPercent: 25,
+            currentPercent: 50,
+            changePercentagePoints: 25,
+            trend: "Improving",
+        },
+    );
+    assert.equal(
+        getCoverageTrend({collectedAtLeastOnce: 2}, {collectedAtLeastOnce: 2}, 4).trend,
+        "Stable",
+    );
+    assert.equal(
+        getCoverageTrend({collectedAtLeastOnce: 0}, {collectedAtLeastOnce: 2}, 4).trend,
+        "Insufficient data",
+    );
+});
+
+test("summarizes repeated collection, lower frequency, recurring gaps, and period concentration", () => {
+    const patterns = summarizeCollectionPatterns({details: [{
+        collectionDays: 2,
+        collectionDates: ["2026-10-31", "2026-11-02"],
+        isLowFrequency: true,
+        repeatedLongGaps: 2,
+    }, {
+        collectionDays: 0,
+        collectionDates: [],
+        isLowFrequency: false,
+        repeatedLongGaps: 0,
+    }, {
+        collectionDays: 1,
+        collectionDates: ["2026-11-03"],
+        isLowFrequency: false,
+        repeatedLongGaps: 0,
+    }]});
+
+    assert.deepEqual(patterns, {
+        repeatedlyCollected: 1,
+        lowFrequency: 1,
+        recurringLongGaps: 1,
+        noRecordedCollection: 1,
+        busiestMonth: {month: "2026-11", houseDays: 2},
+        recordedHouseDays: 3,
+    });
 });
