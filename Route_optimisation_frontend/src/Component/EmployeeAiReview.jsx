@@ -1,5 +1,5 @@
 import {useEffect, useRef, useState} from "react";
-import {generateOllamaEmployeeReview} from "../services/ollamaEmployeeReview.js";
+import {generateGeminiEmployeeReview} from "../services/geminiEmployeeReview.js";
 
 const REVIEW_SECTIONS = [
     ["overallPerformance", "1. Overall Performance"],
@@ -29,7 +29,7 @@ export default function EmployeeAiReview({summary}) {
         setError("");
         setReview(null);
         try {
-            const result = await generateOllamaEmployeeReview(summary, {signal: controller.signal});
+            const result = await generateGeminiEmployeeReview(summary, {signal: controller.signal});
             if (!controller.signal.aborted) setReview(result);
         } catch (requestError) {
             if (requestError?.name !== "AbortError") {
@@ -51,7 +51,7 @@ export default function EmployeeAiReview({summary}) {
                 <div>
                     <h2 id="ai-review-heading" className="text-lg font-semibold text-slate-900">AI Review</h2>
                     <p className="mt-1 text-xs text-slate-600">
-                        Local Ollama · configured model. Uses the calculated summary only; figures above remain authoritative.
+                        Gemini · configured model. Uses the calculated summary only; figures above remain authoritative.
                     </p>
                 </div>
                 <button
@@ -63,7 +63,7 @@ export default function EmployeeAiReview({summary}) {
                     {loading ? "Generating review…" : review ? "Regenerate review" : "Generate AI review"}
                 </button>
             </div>
-            {loading && <p role="status" className="mt-3 text-sm text-slate-600">Waiting for the local Qwen model…</p>}
+            {loading && <p role="status" className="mt-3 text-sm text-slate-600">Waiting for Gemini review…</p>}
             {error && (
                 <p role="alert" className="mt-3 rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
                     {error} Employee Analysis is still available.

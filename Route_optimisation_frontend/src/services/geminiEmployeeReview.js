@@ -1,5 +1,4 @@
-const DEFAULT_OLLAMA_URL = "http://localhost:11434";
-const DEFAULT_OLLAMA_MODEL = "qwen2.5:7b";
+const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
 
 const reviewSchema = {
     type: "object",
@@ -20,11 +19,11 @@ const reviewSchema = {
 
 const numericWords = /\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|once|twice|half)\b/i;
 
-function getOllamaConfig() {
+function getGeminiConfig(apiKey, model) {
     const env = import.meta.env || {};
     return {
-        baseUrl: env.VITE_OLLAMA_BASE_URL || DEFAULT_OLLAMA_URL,
-        model: env.VITE_OLLAMA_MODEL || DEFAULT_OLLAMA_MODEL,
+        apiKey: apiKey || env.VITE_GEMINI_API_KEY || "",
+        model: model || env.VITE_GEMINI_MODEL || DEFAULT_GEMINI_MODEL,
     };
 }
 
@@ -104,7 +103,7 @@ function parseReview(content, summary) {
     try {
         review = JSON.parse(content);
     } catch {
-        throw new Error("Ollama returned a review in an unexpected format. Try again.");
+        throw new Error("Gemini returned a review in an unexpected format. Try again.");
     }
 
     const fields = Object.keys(reviewSchema.properties);
@@ -112,7 +111,7 @@ function parseReview(content, summary) {
         Object.keys(review).length !== fields.length ||
         Object.keys(review).some((field) => !fields.includes(field)) ||
         fields.some((field) => typeof review[field] !== "string" || !review[field].trim())) {
-        throw new Error("Ollama returned an unexpected four-section review format. Try again.");
+        throw new Error("Gemini returned an unexpected four-section review format. Try again.");
     }
     const allowedNumbers = collectAllowedNumbers(summary);
     const hasUnverifiedClaim = fields.some((field) =>
@@ -127,23 +126,32 @@ function parseReview(content, summary) {
     };
 }
 
-export async function generateOllamaEmployeeReview(summary, {signal, fetchImpl = fetch} = {}) {
-    const {baseUrl, model} = getOllamaConfig();
+export async function generateGeminiEmployeeReview(
+    summary,
+    {signal, fetchImpl = fetch, apiKey, model: requestedModel} = {},
+) {
+    const config = getGeminiConfig(apiKey, requestedModel);
+    if (!config.apiKey) {
+        throw new Error(
+            "Gemini API key is missing. Add VITE_GEMINI_API_KEY to Route_optimisation_frontend/.env.local and restart Vite.",
+        );
+    }
+
     let response;
     try {
-        response = await fetchImpl(`${baseUrl.replace(/\/+$/, "")}/api/chat`, {
-            method: "POST",
-            headers: {"Content-Type": "application/json"},
-            signal,
-            body: JSON.stringify({
-                model,
-                stream: false,
-                format: reviewSchema,
-                options: {temperature: 0.1, num_predict: 400},
-                messages: [
-                    {
-                        role: "system",
-                        content: [
+        response = await fetchImpl(
+            `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(config.model)}:generateContent`,
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "x-goog-api-key": config.apiKey,
+                },
+                signal,
+                body: JSON.stringify({
+                    systemInstruction: {
+                        parts: [{
+                            text: [
                             "You are an Employee Collection Performance Reviewer.",
                             "Review the verified employee house-collection data provided below.",
                             "Your job is only to explain the results in simple, professional language.",
@@ -166,34 +174,57 @@ export async function generateOllamaEmployeeReview(summary, {signal, fetchImpl =
                             "Treat null values as unavailable and do not make claims or recommendations based on them.",
                             "Do not infer causes, routes, or house-level facts that are absent from the summary.",
                             "Return only the four JSON string fields defined by the response schema; the interface supplies the numbered section headings.",
-                        ].join(" "),
+                            ].join(" "),
+                        }],
                     },
-                    {
+                    contents: [{
                         role: "user",
-                        content: `Verified Data:\n${JSON.stringify(summary, null, 2)}`,
+                        parts: [{text: `Verified Data:\n${JSON.stringify(summary, null, 2)}`}],
+                    }],
+                    generationConfig: {
+                        responseMimeType: "application/json",
+                        responseSchema: {
+                            type: "OBJECT",
+                            properties: Object.fromEntries(
+                                Object.keys(reviewSchema.properties).map((field) => [field, {type: "STRING"}]),
+                            ),
+                            required: reviewSchema.required,
+                        },
+                        temperature: 0.1,
+                        maxOutputTokens: 400,
                     },
-                ],
-            }),
-        });
+                }),
+            },
+        );
     } catch (error) {
         if (error?.name === "AbortError") throw error;
         if (error instanceof TypeError) {
-            throw new Error(`Could not reach Ollama at ${baseUrl}. Check that it is running and allows this app origin.`);
+            throw new Error("Could not reach the Gemini API. Check your internet connection and try again.");
         }
         throw error;
     }
 
     if (!response.ok) {
-        if (response.status === 404) {
-            throw new Error(`Ollama could not find model "${model}". Check that the local Qwen model is installed.`);
+        let detail = "";
+        try {
+            const errorResult = await response.json();
+            detail = errorResult?.error?.message || "";
+        } catch {
+            detail = "";
         }
-        throw new Error(`Ollama request failed (HTTP ${response.status}).`);
+        throw new Error(
+            detail
+                ? `Gemini API request failed: ${detail}`
+                : `Gemini API request failed (HTTP ${response.status}).`,
+        );
     }
 
     const result = await response.json();
-    const content = result?.message?.content;
+    const content = result?.candidates?.[0]?.content?.parts
+        ?.map((part) => part.text || "")
+        .join("");
     if (typeof content !== "string") {
-        throw new Error("Ollama returned no review. Try again.");
+        throw new Error("Gemini returned no review. Try again.");
     }
     return parseReview(content, summary);
 }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {generateOllamaEmployeeReview} from "../src/services/ollamaEmployeeReview.js";
+import {generateGeminiEmployeeReview} from "../src/services/geminiEmployeeReview.js";
 
 const summary = {
     employeeName: "Example employee",
@@ -35,43 +35,60 @@ const validReview = {
     recommendedAction: "Review the high-priority houses and focus collection follow-up there.",
 };
 
-test("sends the calculated summary to local Ollama and parses the four review sections", async () => {
+function generateReview(summaryValue, options = {}) {
+    return generateGeminiEmployeeReview(summaryValue, {apiKey: "test-key", ...options});
+}
+
+function responseWithReview(review) {
+    return {
+        ok: true,
+        json: async () => ({
+            candidates: [{content: {parts: [{text: JSON.stringify(review)}]}}],
+        }),
+    };
+}
+
+test("sends the calculated summary to Gemini and parses the four review sections", async () => {
     let requestUrl;
+    let requestOptions;
     let requestBody;
-    const review = await generateOllamaEmployeeReview(summary, {
+    const review = await generateReview(summary, {
         fetchImpl: async (url, options) => {
             requestUrl = url;
+            requestOptions = options;
             requestBody = JSON.parse(options.body);
-            return {
-                ok: true,
-                json: async () => ({message: {content: JSON.stringify(validReview)}}),
-            };
+            return responseWithReview(validReview);
         },
     });
 
-    assert.equal(requestUrl, "http://localhost:11434/api/chat");
-    assert.equal(requestBody.model, "qwen2.5:7b");
-    assert.match(requestBody.messages[0].content, /You are an Employee Collection Performance Reviewer/);
-    assert.match(requestBody.messages[0].content, /Do not assume that every house must be scanned every day/);
-    assert.match(requestBody.messages[0].content, /long collection gaps/);
     assert.equal(
-        requestBody.messages[1].content,
+        requestUrl,
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+    );
+    assert.equal(requestOptions.headers["x-goog-api-key"], "test-key");
+    assert.match(requestBody.systemInstruction.parts[0].text, /You are an Employee Collection Performance Reviewer/);
+    assert.match(requestBody.systemInstruction.parts[0].text, /Do not assume that every house must be scanned every day/);
+    assert.match(requestBody.systemInstruction.parts[0].text, /long collection gaps/);
+    assert.equal(
+        requestBody.contents[0].parts[0].text,
         `Verified Data:\n${JSON.stringify(summary, null, 2)}`,
     );
-    assert.equal(requestBody.stream, false);
+    assert.equal(requestBody.generationConfig.responseMimeType, "application/json");
+    assert.deepEqual(requestBody.generationConfig.responseSchema.required, [
+        "overallPerformance",
+        "whatIsGoingWell",
+        "needsAttention",
+        "recommendedAction",
+    ]);
     assert.deepEqual(review.sections, validReview);
     assert.equal(review.validationWarning, null);
 });
 
 test("displays the review and warns when it contains a number absent from the summary", async () => {
-    const review = await generateOllamaEmployeeReview(summary, {
-        fetchImpl: async () => ({
-            ok: true,
-            json: async () => ({
-                message: {
-                    content: JSON.stringify({...validReview, overallPerformance: "Coverage is 90 percent."}),
-                },
-            }),
+    const review = await generateReview(summary, {
+        fetchImpl: async () => responseWithReview({
+            ...validReview,
+            overallPerformance: "Coverage is 90 percent.",
         }),
     });
 
@@ -80,17 +97,10 @@ test("displays the review and warns when it contains a number absent from the su
 });
 
 test("displays the review and warns when it combines counts into a ratio", async () => {
-    const review = await generateOllamaEmployeeReview(summary, {
-        fetchImpl: async () => ({
-            ok: true,
-            json: async () => ({
-                message: {
-                    content: JSON.stringify({
-                        ...validReview,
-                        overallPerformance: "The assigned employee collected 70 out of 120 houses.",
-                    }),
-                },
-            }),
+    const review = await generateReview(summary, {
+        fetchImpl: async () => responseWithReview({
+            ...validReview,
+            overallPerformance: "The assigned employee collected 70 out of 120 houses.",
         }),
     });
 
@@ -99,22 +109,15 @@ test("displays the review and warns when it combines counts into a ratio", async
 });
 
 test("allows exact reporting dates but rejects changed dates", async () => {
-    const fetchImpl = (date) => async () => ({
-        ok: true,
-        json: async () => ({
-            message: {
-                content: JSON.stringify({
-                    ...validReview,
-                    overallPerformance: `Reviewing activity from ${date} through 2026-11-12.`,
-                }),
-            },
-        }),
+    const fetchImpl = (date) => async () => responseWithReview({
+        ...validReview,
+        overallPerformance: `Reviewing activity from ${date} through 2026-11-12.`,
     });
 
     await assert.doesNotReject(
-        generateOllamaEmployeeReview(summary, {fetchImpl: fetchImpl("2026-10-14")}),
+        generateReview(summary, {fetchImpl: fetchImpl("2026-10-14")}),
     );
-    const changedDateReview = await generateOllamaEmployeeReview(
+    const changedDateReview = await generateReview(
         summary,
         {fetchImpl: fetchImpl("2026-10-15")},
     );
@@ -122,45 +125,46 @@ test("allows exact reporting dates but rejects changed dates", async () => {
 });
 
 test("requires collection-pattern percentages to retain their source denominator", async () => {
-    const fetchImpl = (sentence) => async () => ({
-        ok: true,
-        json: async () => ({
-            message: {
-                content: JSON.stringify({
-                    ...validReview,
-                    whatIsGoingWell: sentence,
-                }),
-            },
-        }),
+    const fetchImpl = (sentence) => async () => responseWithReview({
+        ...validReview,
+        whatIsGoingWell: sentence,
     });
 
     await assert.doesNotReject(
-        generateOllamaEmployeeReview(summary, {
+        generateReview(summary, {
             fetchImpl: fetchImpl("75% of houses with collection history followed the observed pattern."),
         }),
     );
-    const misattributedReview = await generateOllamaEmployeeReview(summary, {
+    const misattributedReview = await generateReview(summary, {
         fetchImpl: fetchImpl("75% of all houses followed the observed pattern."),
     });
     assert.ok(misattributedReview.validationWarning);
 });
 
-test("reports a missing local model without hiding the failure", async () => {
+test("requires a Gemini API key", async () => {
     await assert.rejects(
-        generateOllamaEmployeeReview(summary, {
-            fetchImpl: async () => ({ok: false, status: 404}),
-        }),
-        /could not find model "qwen2.5:7b"/i,
+        generateGeminiEmployeeReview(summary, {fetchImpl: async () => responseWithReview(validReview), apiKey: ""}),
+        /VITE_GEMINI_API_KEY/,
     );
 });
 
-test("reports a disconnected Ollama service clearly", async () => {
+test("reports Gemini API errors and network failures clearly", async () => {
     await assert.rejects(
-        generateOllamaEmployeeReview(summary, {
+        generateReview(summary, {
+            fetchImpl: async () => ({
+                ok: false,
+                status: 400,
+                json: async () => ({error: {message: "API key not valid"}}),
+            }),
+        }),
+        /Gemini API request failed: API key not valid/,
+    );
+    await assert.rejects(
+        generateReview(summary, {
             fetchImpl: async () => {
                 throw new TypeError("fetch failed");
             },
         }),
-        /Could not reach Ollama at http:\/\/localhost:11434/,
+        /Could not reach the Gemini API/,
     );
 });
