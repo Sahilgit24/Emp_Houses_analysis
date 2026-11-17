@@ -145,6 +145,16 @@ function parseReview(content, summary, wasTruncated) {
     };
 }
 
+function getInteractionOutputText(interaction) {
+    return (interaction?.steps || [])
+        .filter((step) => step.type === "model_output")
+        .flatMap((step) => step.content || [])
+        .filter((content) => content.type === "text")
+        .map((content) => content.text || "")
+        .join("\n")
+        .trim();
+}
+
 export async function generateGeminiEmployeeReview(
     summary,
     {signal, fetchImpl = fetch, apiKey, model: requestedModel} = {},
@@ -159,7 +169,7 @@ export async function generateGeminiEmployeeReview(
     let response;
     try {
         response = await fetchImpl(
-            `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(config.model)}:generateContent`,
+            "https://generativelanguage.googleapis.com/v1beta/interactions",
             {
                 method: "POST",
                 headers: {
@@ -168,43 +178,37 @@ export async function generateGeminiEmployeeReview(
                 },
                 signal,
                 body: JSON.stringify({
-                    systemInstruction: {
-                        parts: [{
-                            text: [
-                                "You are an Employee Collection Performance Reviewer.",
-                                "Review the verified employee house-collection data provided below.",
-                                "Your job is only to explain the results in simple, professional language.",
-                                "Keep each section to one or two concise sentences.",
-                                "Do not calculate, change, or invent any numbers. Use only the information provided.",
-                                "Do not assume that every house must be scanned every day.",
-                                "Return exactly these sections, in this order: 1. Overall Performance; 2. What Is Going Well; 3. Needs Attention; 4. Recommended Action.",
-                                "Focus on Beat coverage, houses collected by the assigned employee, houses collected by other employees, uncollected houses, collection frequency, long collection gaps, houses requiring attention, and outside-Beat collection.",
-                                "Beat coverage includes collection by both the assigned employee and other employees; never describe the assigned employee's count as total Beat coverage.",
-                                "Use each count only for the category named in its field. Do not compare counts, infer a majority, or express counts as a ratio or 'x out of y'.",
-                                "Use the supplied Beat coverage and collection-pattern percentages as written; do not derive or restate percentages from counts.",
-                                "Keep each percentage attached to its exact definition and denominator: Beat coverage refers to housesWithAnyCollection among totalHousesInBeat; withinObservedPatternPercent refers only to housesWithCollectionHistory.",
-                                "Whenever you mention withinObservedPatternPercent, explicitly state that it is among houses with collection history.",
-                                "Do not describe a percentage as applying to all houses or to a different employee/category than its definition states.",
-                                "Do not call a count a majority, significant portion, strong performance, or poor performance unless that exact assessment is explicitly supplied.",
-                                "In Overall Performance, report Beat coverage, assigned-employee collections, other-employee collections, and uncollected houses under their separate labels.",
-                                "In What Is Going Well, describe only recorded regular-collection counts or the observed-pattern percentage with its stated denominator.",
-                                "In Needs Attention, describe low-frequency houses, long gaps, overdue houses, high-priority houses, and uncollected houses using their own labels; do not imply these categories are additive or distinct.",
-                                "In Recommended Action, refer only to categories present in the summary; do not invent house IDs, routes, areas, or causes.",
-                                "Only repeat numeric values exactly as supplied and with their original meaning; otherwise omit them.",
-                                "Treat null values as unavailable and do not make claims or recommendations based on them.",
-                                "Do not infer causes, routes, or house-level facts that are absent from the summary.",
-                                "Write a plain-text review with exactly these four section headings, each on its own line: 1. Overall Performance; 2. What Is Going Well; 3. Needs Attention; 4. Recommended Action.",
-                                "Do not return JSON, code fences, or text outside the four sections.",
-                            ].join(" "),
-                        }],
-                    },
-                    contents: [{
-                        role: "user",
-                        parts: [{text: `Verified Data:\n${JSON.stringify(summary, null, 2)}`}],
-                    }],
-                    generationConfig: {
-                        temperature: 0.1,
-                        maxOutputTokens: 1200,
+                    model: config.model,
+                    system_instruction: [
+                        "You are an Employee Collection Performance Reviewer.",
+                        "Review the verified employee house-collection data provided below.",
+                        "Your job is only to explain the results in simple, professional language.",
+                        "Keep each section to one concise sentence.",
+                        "Do not calculate, change, or invent any numbers. Use only the information provided.",
+                        "Do not assume that every house must be scanned every day.",
+                        "Return exactly these sections, in this order: 1. Overall Performance; 2. What Is Going Well; 3. Needs Attention; 4. Recommended Action.",
+                        "Focus on Beat coverage, houses collected by the assigned employee, houses collected by other employees, uncollected houses, collection frequency, long collection gaps, houses requiring attention, and outside-Beat collection.",
+                        "Beat coverage includes collection by both the assigned employee and other employees; never describe the assigned employee's count as total Beat coverage.",
+                        "Use each count only for the category named in its field. Do not compare counts, infer a majority, or express counts as a ratio or 'x out of y'.",
+                        "Use the supplied Beat coverage and collection-pattern percentages as written; do not derive or restate percentages from counts.",
+                        "Keep each percentage attached to its exact definition and denominator: Beat coverage refers to housesWithAnyCollection among totalHousesInBeat; withinObservedPatternPercent refers only to housesWithCollectionHistory.",
+                        "Whenever you mention withinObservedPatternPercent, explicitly state that it is among houses with collection history.",
+                        "Do not describe a percentage as applying to all houses or to a different employee/category than its definition states.",
+                        "Do not call a count a majority, significant portion, strong performance, or poor performance unless that exact assessment is explicitly supplied.",
+                        "In Overall Performance, report Beat coverage, assigned-employee collections, other-employee collections, and uncollected houses under their separate labels.",
+                        "In What Is Going Well, describe only recorded regular-collection counts or the observed-pattern percentage with its stated denominator.",
+                        "In Needs Attention, describe low-frequency houses, long gaps, overdue houses, high-priority houses, and uncollected houses using their own labels; do not imply these categories are additive or distinct.",
+                        "In Recommended Action, refer only to categories present in the summary; do not invent house IDs, routes, areas, or causes.",
+                        "Only repeat numeric values exactly as supplied and with their original meaning; otherwise omit them.",
+                        "Treat null values as unavailable and do not make claims or recommendations based on them.",
+                        "Do not infer causes, routes, or house-level facts that are absent from the summary.",
+                        "Write a plain-text review with exactly these four section headings, each on its own line: 1. Overall Performance; 2. What Is Going Well; 3. Needs Attention; 4. Recommended Action.",
+                        "Do not return JSON, code fences, or text outside the four sections.",
+                    ].join(" "),
+                    input: `Verified Data:\n${JSON.stringify(summary, null, 2)}`,
+                    generation_config: {
+                        thinking_level: "low",
+                        max_output_tokens: 1600,
                     },
                 }),
             },
@@ -233,12 +237,10 @@ export async function generateGeminiEmployeeReview(
     }
 
     const result = await response.json();
-    const candidate = result?.candidates?.[0];
-    const content = candidate?.content?.parts
-        ?.map((part) => part.text || "")
-        .join("");
+    const content = getInteractionOutputText(result);
     if (typeof content !== "string" || !content.trim()) {
         throw new Error("Gemini returned no review. Try again.");
     }
-    return parseReview(content, summary, candidate.finishReason === "MAX_TOKENS");
+    const wasTruncated = ["incomplete", "requires_continuation"].includes(result.status);
+    return parseReview(content, summary, wasTruncated);
 }

@@ -52,11 +52,12 @@ function responseWithReview(review) {
     return responseWithText(content);
 }
 
-function responseWithText(text, finishReason = "STOP") {
+function responseWithText(text, status = "completed") {
     return {
         ok: true,
         json: async () => ({
-            candidates: [{content: {parts: [{text}]}, finishReason}],
+            status,
+            steps: [{type: "model_output", content: [{type: "text", text}]}],
         }),
     };
 }
@@ -76,21 +77,23 @@ test("sends the calculated summary to Gemini and displays four plain-text sectio
 
     assert.equal(
         requestUrl,
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
+        "https://generativelanguage.googleapis.com/v1beta/interactions",
     );
     assert.equal(requestOptions.headers["x-goog-api-key"], "test-key");
-    assert.match(requestBody.systemInstruction.parts[0].text, /You are an Employee Collection Performance Reviewer/);
-    assert.match(requestBody.systemInstruction.parts[0].text, /Do not assume that every house must be scanned every day/);
-    assert.match(requestBody.systemInstruction.parts[0].text, /long collection gaps/);
-    assert.match(requestBody.systemInstruction.parts[0].text, /Do not return JSON/);
-    assert.match(requestBody.systemInstruction.parts[0].text, /one or two concise sentences/);
+    assert.equal(requestBody.model, "gemini-3.8-flash");
+    assert.match(requestBody.system_instruction, /You are an Employee Collection Performance Reviewer/);
+    assert.match(requestBody.system_instruction, /Do not assume that every house must be scanned every day/);
+    assert.match(requestBody.system_instruction, /long collection gaps/);
+    assert.match(requestBody.system_instruction, /Do not return JSON/);
+    assert.match(requestBody.system_instruction, /one concise sentence/);
     assert.equal(
-        requestBody.contents[0].parts[0].text,
+        requestBody.input,
         `Verified Data:\n${JSON.stringify(summary, null, 2)}`,
     );
-    assert.equal(requestBody.generationConfig.responseMimeType, undefined);
-    assert.equal(requestBody.generationConfig.responseSchema, undefined);
-    assert.equal(requestBody.generationConfig.maxOutputTokens, 1200);
+    assert.deepEqual(requestBody.generation_config, {
+        thinking_level: "low",
+        max_output_tokens: 1600,
+    });
     assert.deepEqual(review.sections, validReview);
     assert.equal(review.unsectioned, null);
     assert.equal(review.validationWarning, null);
@@ -110,7 +113,7 @@ test("shows Gemini's full response when it does not return all section headings"
 test("warns when Gemini marks the review as truncated", async () => {
     const content = "1. Overall Performance\nDuring the reporting period from 2026-";
     const review = await generateReview(summary, {
-        fetchImpl: async () => responseWithText(content, "MAX_TOKENS"),
+        fetchImpl: async () => responseWithText(content, "incomplete"),
     });
 
     assert.equal(review.unsectioned, content);

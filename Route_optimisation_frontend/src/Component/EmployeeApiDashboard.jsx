@@ -15,6 +15,10 @@ function formatNumber(value, digits = 0) {
     return Number(value || 0).toLocaleString(undefined, {maximumFractionDigits: digits});
 }
 
+function roundedPercent(value) {
+    return value == null ? null : Number(value.toFixed(1));
+}
+
 function formatDays(value) {
     return value == null ? "—" : `${formatNumber(value, 1)} day${value === 1 ? "" : "s"}`;
 }
@@ -304,7 +308,7 @@ export default function EmployeeApiDashboard({
                 housesCollectedByOtherEmployees: otherCount,
                 housesWithAnyCollection: houseCoverage.collectedAtLeastOnce,
                 housesNotCollected: remainingCount,
-                coveragePercent: beatCoveragePercent,
+                coveragePercent: roundedPercent(beatCoveragePercent),
                 coverageDefinition: "Beat coverage percentage uses housesWithAnyCollection divided by totalHousesInBeat; housesWithAnyCollection includes both assigned-employee and other-employee collections.",
             },
             collectionRegularity: {
@@ -316,7 +320,7 @@ export default function EmployeeApiDashboard({
                 highPriorityHouses: highPriorityHouses.length,
                 housesNotCollected: attentionCounts.notCollected,
                 housesWithCollectionHistory: attentionCounts.withHistory,
-                withinObservedPatternPercent: regularRate,
+                withinObservedPatternPercent: roundedPercent(regularRate),
                 withinObservedPatternPercentDefinition: "Percentage of housesWithCollectionHistory whose status is Regular; this does not describe all Beat houses.",
             },
             outsideBeatCollection: {
