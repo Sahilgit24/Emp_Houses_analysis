@@ -125,8 +125,10 @@ function parseReview(content, summary, wasTruncated) {
         ? reviewSectionDefinitions.map(([field]) => sections[field]).join("\n")
         : reviewText;
     const allowedNumbers = collectAllowedNumbers(summary);
-    const hasUnverifiedClaim = hasUnverifiedNumbers(reviewedText, allowedNumbers) ||
-        hasMisattributedPercentages(reviewedText, summary);
+    const hasUnverifiedClaim = !wasTruncated && (
+        hasUnverifiedNumbers(reviewedText, allowedNumbers) ||
+        hasMisattributedPercentages(reviewedText, summary)
+    );
     return {
         sections: canSeparateSections
             ? Object.fromEntries(reviewSectionDefinitions.map(([field]) => [field, sections[field].trim()]))

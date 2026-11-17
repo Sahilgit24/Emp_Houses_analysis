@@ -108,13 +108,14 @@ test("shows Gemini's full response when it does not return all section headings"
 });
 
 test("warns when Gemini marks the review as truncated", async () => {
-    const content = "1. Overall Performance\nThe report covers the selected Beat.";
+    const content = "1. Overall Performance\nDuring the reporting period from 2026-";
     const review = await generateReview(summary, {
         fetchImpl: async () => responseWithText(content, "MAX_TOKENS"),
     });
 
     assert.equal(review.unsectioned, content);
     assert.match(review.formatWarning, /reached its response limit/);
+    assert.equal(review.validationWarning, null);
 });
 
 test("parses Markdown-formatted section headings", async () => {
