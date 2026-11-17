@@ -1,5 +1,6 @@
 from flask import Blueprint, jsonify, request
 
+from employee_anomalies import analyze_employee_anomalies
 from analytics_store import (
     get_dashboard,
     get_geographic_map,
@@ -8,6 +9,22 @@ from analytics_store import (
 
 
 analytics_bp = Blueprint("analytics", __name__, url_prefix="/analytics")
+
+
+@analytics_bp.route("/employee-anomalies", methods=["POST"])
+def employee_anomalies():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({
+            "status": "error",
+            "message": "Upload a JSON object containing employee anomaly analysis data.",
+        }), 400
+    try:
+        return jsonify(analyze_employee_anomalies(payload))
+    except ValueError as error:
+        return jsonify({"status": "error", "message": str(error)}), 400
+    except Exception as error:
+        return jsonify({"status": "error", "message": str(error)}), 500
 
 
 @analytics_bp.route("/dashboard", methods=["GET"])

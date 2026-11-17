@@ -3,12 +3,13 @@ import {
     analyzeHouseCoverage,
     analyzeOutsideBeatCollections,
     getReportWindowDays,
-    getHighPriorityHouses,
+    getHighPriorityAttentionHouses,
     getNextCollectionPriorities,
     getCoverageTrend,
     summarizeCollectionPatterns,
-    summarizeRecentEmployeeCollectionOutput,
+    summarizeDailyEmployeeReport,
 } from "../data/employeePerformance.js";
+import {API_URL} from "../config.js";
 import EmployeeAiReview from "./EmployeeAiReview.jsx";
 
 function formatNumber(value, digits = 0) {
@@ -73,6 +74,9 @@ export default function EmployeeApiDashboard({
     const beats = beatData?.beats || [];
     const [selectedBeatId, setSelectedBeatId] = useState("");
     const [priorityPage, setPriorityPage] = useState(0);
+    const [anomalyResult, setAnomalyResult] = useState(null);
+    const [anomalyLoading, setAnomalyLoading] = useState(false);
+    const [anomalyError, setAnomalyError] = useState("");
 
     useEffect(() => {
         if (!beats.length) {
@@ -115,6 +119,18 @@ export default function EmployeeApiDashboard({
     const effectiveStartDate = rollingStartDate && dataStartDate > rollingStartDate
         ? dataStartDate
         : rollingStartDate || dataStartDate;
+    const historicalDataStartDate = useMemo(() => {
+        if (!beat) return effectiveEndDate;
+        const dates = [
+            beat.fromDate,
+            ...(beat.routes || []).map((route) => route.date),
+            ...(beat.houses || []).flatMap((house) => [
+                ...(house.history?.collectionDates || []),
+                house.scanningDate?.slice(0, 10),
+            ]),
+        ].filter(Boolean).sort();
+        return dates[0] || effectiveEndDate;
+    }, [beat, effectiveEndDate]);
     const analysisRoutes = useMemo(() => routes.filter((route) =>
         (!effectiveStartDate || route.date >= effectiveStartDate) &&
         (!effectiveEndDate || route.date <= effectiveEndDate)
@@ -147,21 +163,17 @@ export default function EmployeeApiDashboard({
             : null,
         [beat, effectiveEndDate],
     );
-    const recentCollectionOutput = useMemo(
-        () => summarizeRecentEmployeeCollectionOutput(houseCoverage, effectiveEndDate),
-        [effectiveEndDate, houseCoverage],
-    );
     const previousWindowEndDate = addDays(effectiveStartDate, -1);
     const previousWindowStartDate = reportWindowDays == null || !previousWindowEndDate
         ? null
         : addDays(previousWindowEndDate, -(reportWindowDays - 1));
     const previousWindowIsAvailable = Boolean(previousWindowStartDate &&
         previousWindowEndDate &&
-        previousWindowStartDate >= dataStartDate &&
+        previousWindowStartDate >= historicalDataStartDate &&
         (!beat?.toDate || previousWindowEndDate <= beat.toDate));
     const previousHouseCoverage = useMemo(() => {
         if (!previousWindowIsAvailable || !beat) return null;
-        const previousRoutes = routes.filter((route) =>
+        const previousRoutes = (beat.routes || []).filter((route) =>
             route.date >= previousWindowStartDate && route.date <= previousWindowEndDate
         );
         return analyzeHouseCoverage(
@@ -178,7 +190,6 @@ export default function EmployeeApiDashboard({
         previousWindowEndDate,
         previousWindowIsAvailable,
         previousWindowStartDate,
-        routes,
     ]);
     const coverageTrend = useMemo(
         () => getCoverageTrend(previousHouseCoverage, houseCoverage, beat?.houses.length || 0),
@@ -194,19 +205,164 @@ export default function EmployeeApiDashboard({
         ),
         [analysisRoutes, beat, effectiveEndDate, effectiveStartDate, otherBeats],
     );
-    const highPriorityHouses = useMemo(
-        () => getHighPriorityHouses(houseCoverage, reportWindowDays),
-        [houseCoverage, reportWindowDays],
+    const historicalRoutes = useMemo(
+        () => (beat?.routes || []).filter((route) =>
+            !effectiveEndDate || route.date <= effectiveEndDate
+        ),
+        [beat, effectiveEndDate],
     );
+    const historicalHouseCoverage = useMemo(
+        () => analyzeHouseCoverage(
+            beat?.houses || [],
+            historicalRoutes,
+            null,
+            effectiveEndDate,
+            beat?.assignedEmployee,
+            otherBeats,
+        ),
+        [beat, effectiveEndDate, historicalRoutes, otherBeats],
+    );
+    const dailyEmployeeReport = useMemo(
+        () => summarizeDailyEmployeeReport(historicalHouseCoverage, historicalRoutes, effectiveEndDate),
+        [effectiveEndDate, historicalHouseCoverage, historicalRoutes],
+    );
+    const historicalOutsideBeatAnalysis = useMemo(
+        () => analyzeOutsideBeatCollections(
+            historicalRoutes,
+            otherBeats,
+            beat?.assignedEmployee?.id,
+            null,
+            effectiveEndDate,
+        ),
+        [beat, effectiveEndDate, historicalRoutes, otherBeats],
+    );
+    const anomalyPayload = useMemo(() => {
+        if (!beat || !effectiveEndDate) return null;
+        const outsideHouseIdsByDate = new Map(
+            historicalOutsideBeatAnalysis.byDate.map(({date, houseIds}) => [date, houseIds]),
+        );
+        const routesByDate = new Map();
+        const assignedEmployeeId = String(beat.assignedEmployee?.id || "");
+        historicalRoutes.forEach((route) => {
+            const routeData = routesByDate.get(route.date) || {
+                hasRouteData: false,
+                hasRouteCollectionData: false,
+            };
+            routeData.hasRouteData = true;
+            routeData.hasRouteCollectionData = routeData.hasRouteCollectionData ||
+                Boolean(assignedEmployeeId && route.collectionScans.some((scan) =>
+                    String(scan.scannerUserId || assignedEmployeeId) === assignedEmployeeId
+                ));
+            routesByDate.set(route.date, routeData);
+        });
+        const activityDates = new Set(routesByDate.keys());
+        historicalHouseCoverage.details.forEach((detail) => {
+            detail.assignedCollectionDates.forEach((date) => activityDates.add(date));
+            detail.otherEmployeeCollectionDates.forEach((date) => activityDates.add(date));
+        });
+
+        return {
+            selected_date: effectiveEndDate,
+            total_houses: beat.houses.length,
+            daily_activity: [...activityDates].sort().map((date) => {
+                const assignedDetails = historicalHouseCoverage.details.filter((detail) =>
+                    detail.assignedCollectionDates.includes(date)
+                );
+                const otherHouseIds = historicalHouseCoverage.details
+                    .filter((detail) => detail.otherEmployeeCollectionDates.includes(date))
+                    .map((detail) => detail.house.houseId);
+                const routeData = routesByDate.get(date);
+                return {
+                    date,
+                    assigned_house_ids: assignedDetails.map((detail) => detail.house.houseId),
+                    other_house_ids: otherHouseIds,
+                    outside_beat_house_ids: outsideHouseIdsByDate.get(date) || [],
+                    assigned_house_coordinates: assignedDetails
+                        .filter((detail) =>
+                            Number.isFinite(detail.house.lat) &&
+                            Number.isFinite(detail.house.lon)
+                        )
+                        .map((detail) => ({
+                            lat: detail.house.lat,
+                            lon: detail.house.lon,
+                        })),
+                    has_activity_data: Boolean(
+                        routeData?.hasRouteData || assignedDetails.length || otherHouseIds.length
+                    ),
+                    has_route_collection_data: Boolean(routeData?.hasRouteCollectionData),
+                };
+            }),
+            house_patterns: historicalHouseCoverage.details.map((detail) => ({
+                house_id: detail.house.houseId,
+                collection_days: detail.collectionDays,
+                typical_interval_days: detail.typicalIntervalDays,
+                current_gap_days: detail.currentGapDays,
+                repeated_long_gaps: detail.repeatedLongGaps,
+                status: detail.status,
+            })),
+        };
+    }, [
+        beat,
+        effectiveEndDate,
+        historicalHouseCoverage,
+        historicalOutsideBeatAnalysis.byDate,
+        historicalRoutes,
+    ]);
+
+    useEffect(() => {
+        if (!anomalyPayload) {
+            setAnomalyResult(null);
+            setAnomalyError("");
+            setAnomalyLoading(false);
+            return undefined;
+        }
+
+        const controller = new AbortController();
+        setAnomalyResult(null);
+        setAnomalyError("");
+        setAnomalyLoading(true);
+        const loadAnomalies = async () => {
+            try {
+                const response = await fetch(`${API_URL}/analytics/employee-anomalies`, {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify(anomalyPayload),
+                    signal: controller.signal,
+                });
+                const result = await response.json();
+                if (!response.ok) {
+                    throw new Error(result.message || "The anomaly analysis request failed.");
+                }
+                if (result.status !== "success") {
+                    throw new Error("The anomaly analysis returned an invalid response.");
+                }
+                setAnomalyResult(result);
+            } catch (error) {
+                if (error.name !== "AbortError") {
+                    setAnomalyError(error.message || "Anomaly analysis is unavailable.");
+                }
+            } finally {
+                if (!controller.signal.aborted) setAnomalyLoading(false);
+            }
+        };
+        loadAnomalies();
+        return () => controller.abort();
+    }, [anomalyPayload]);
     const nextCollectionPriorities = useMemo(
         () => getNextCollectionPriorities(
-            houseCoverage,
-            reportWindowDays,
+            historicalHouseCoverage,
             effectiveEndDate,
-            highPriorityHouses,
         ),
-        [effectiveEndDate, highPriorityHouses, houseCoverage, reportWindowDays],
+        [effectiveEndDate, historicalHouseCoverage],
     );
+    const highPriorityHouses = useMemo(
+        () => getHighPriorityAttentionHouses(nextCollectionPriorities),
+        [nextCollectionPriorities],
+    );
+    const noScanHistoryCount = nextCollectionPriorities.filter((item) =>
+        !item.detail.collectionDates.length
+    ).length;
+    const dueHouseCount = nextCollectionPriorities.length - noScanHistoryCount;
     const priorityPageSize = 50;
     const priorityPageCount = Math.max(1, Math.ceil(nextCollectionPriorities.length / priorityPageSize));
     const currentPriorityPage = Math.min(priorityPage, priorityPageCount - 1);
@@ -215,8 +371,8 @@ export default function EmployeeApiDashboard({
         (currentPriorityPage + 1) * priorityPageSize,
     );
     const collectionPatterns = useMemo(
-        () => summarizeCollectionPatterns(houseCoverage),
-        [houseCoverage],
+        () => summarizeCollectionPatterns(historicalHouseCoverage),
+        [historicalHouseCoverage],
     );
     const highPriorityHouseIds = useMemo(
         () => highPriorityHouses
@@ -227,17 +383,16 @@ export default function EmployeeApiDashboard({
         [highPriorityHouses],
     );
     const attentionCounts = useMemo(() => {
-        const counts = {regular: 0, lowFrequency: 0, needsAttention: 0, overdue: 0, notCollected: 0, withHistory: 0};
-        houseCoverage.details.forEach((detail) => {
+        const counts = {regular: 0, lowFrequency: 0, needsAttention: 0, overdue: 0, withHistory: 0};
+        historicalHouseCoverage.details.forEach((detail) => {
             if (detail.collectionDays) counts.withHistory += 1;
             if (detail.status === "Regular") counts.regular += 1;
             else if (detail.status === "Low Frequency") counts.lowFrequency += 1;
             else if (detail.status === "Needs Attention") counts.needsAttention += 1;
             else if (detail.status === "Overdue") counts.overdue += 1;
-            else counts.notCollected += 1;
         });
         return counts;
-    }, [houseCoverage]);
+    }, [historicalHouseCoverage]);
 
     const otherEmployeeGroups = useMemo(() => {
         const employees = new Map();
@@ -273,18 +428,7 @@ export default function EmployeeApiDashboard({
         houseCoverage.assignedEmployeeCollected + houseCoverage.otherEmployeeCollected;
     const reportNotScannedHouses = beat?.totalNotScannedHouses ??
         houseCoverage.remainingWithoutHistory;
-    const selectedDayHouseCount = recentCollectionOutput?.selectedDateHouseCount ?? 0;
-    const previousFiveDayPeak = recentCollectionOutput?.previousFiveDayPeak;
-    const housesBelowRecentPeak = previousFiveDayPeak
-        ? previousFiveDayPeak.count - selectedDayHouseCount
-        : null;
-    const recentPeakComparison = housesBelowRecentPeak == null
-        ? "Unavailable"
-        : housesBelowRecentPeak > 0
-            ? `${formatNumber(housesBelowRecentPeak)} fewer`
-            : housesBelowRecentPeak < 0
-                ? `${formatNumber(Math.abs(housesBelowRecentPeak))} more`
-                : "Matches recent high";
+    const dailyHouseCountChange = dailyEmployeeReport?.houseCountChange ?? 0;
     const beatCoveragePercent = totalHouses
         ? (ownCount + otherCount) * 100 / totalHouses
         : null;
@@ -316,12 +460,12 @@ export default function EmployeeApiDashboard({
                 lowFrequencyHouses: attentionCounts.lowFrequency,
                 housesWithLongCollectionGaps: attentionCounts.needsAttention,
                 overdueHouses: attentionCounts.overdue,
-                housesRequiringAttention: attentionCounts.needsAttention + attentionCounts.overdue,
+                housesRequiringAttention: nextCollectionPriorities.length,
                 highPriorityHouses: highPriorityHouses.length,
-                housesNotCollected: attentionCounts.notCollected,
+                housesNotCollected: remainingCount,
                 housesWithCollectionHistory: attentionCounts.withHistory,
                 withinObservedPatternPercent: roundedPercent(regularRate),
-                withinObservedPatternPercentDefinition: "Percentage of housesWithCollectionHistory whose status is Regular; this does not describe all Beat houses.",
+                withinObservedPatternPercentDefinition: "Percentage of housesWithCollectionHistory whose status is Regular through the selected analysis date; this does not describe all Beat houses.",
             },
             outsideBeatCollection: {
                 distinctHousesCollected: beats.length > 1 ? outsideBeatAnalysis.totalHouses : null,
@@ -335,6 +479,7 @@ export default function EmployeeApiDashboard({
         effectiveEndDate,
         effectiveStartDate,
         houseCoverage.collectedAtLeastOnce,
+        nextCollectionPriorities.length,
         highPriorityHouses.length,
         otherCount,
         outsideBeatAnalysis.totalHouses,
@@ -432,7 +577,7 @@ export default function EmployeeApiDashboard({
                                 Show High-Priority Houses on Map ({formatNumber(highPriorityHouseIds.length)})
                             </button>
                             <span className="text-xs text-slate-500">
-                                High priority: no scan in the 7 days before the selected analysis date.
+                                High-priority houses have no scan recorded in BeatWiseReport history or a gap over 2.5 times their usual interval.
                             </span>
                         </div>
                     </div>
@@ -476,10 +621,11 @@ export default function EmployeeApiDashboard({
                         </div>
                     )}
                     <p className="rounded border border-slate-200 bg-white p-3 text-sm text-slate-700">
-                        <span className="font-semibold">{reportWindowLabel} regularity:</span>{" "}
-                        {formatNumber(attentionCounts.regular)} regularly collected · {formatNumber(attentionCounts.lowFrequency)} low collection ·{" "}
-                        {formatNumber(highPriorityHouses.length)} high priority ·{" "}
-                        {formatNumber(attentionCounts.notCollected)} not collected.
+                        <span className="font-semibold">Historical house patterns through {formatDate(effectiveEndDate)}:</span>{" "}
+                        {formatNumber(attentionCounts.regular)} regular · {formatNumber(attentionCounts.lowFrequency)} low frequency ·{" "}
+                        {formatNumber(attentionCounts.overdue)} overdue · {formatNumber(attentionCounts.needsAttention)} with recurring long gaps ·{" "}
+                        {formatNumber(nextCollectionPriorities.length)} requiring attention ({formatNumber(highPriorityHouses.length)} high priority) ·{" "}
+                        {formatNumber(collectionPatterns.noRecordedCollection)} with no scan recorded in the available BeatWiseReport history.
                         {regularRate == null ? "" : ` ${formatNumber(regularRate, 1)}% of houses with collection history are within their observed pattern.`}
                         {" "}Outside-Beat houses collected by this employee: {beats.length > 1
                             ? formatNumber(outsideBeatAnalysis.totalHouses)
@@ -493,10 +639,21 @@ export default function EmployeeApiDashboard({
                 <section className="rounded-xl bg-white p-4 shadow-sm">
                     <div>
                         <h2 className="text-lg font-semibold text-slate-900">
-                            Houses Requiring Attention &amp; Next Collection Priority
+                            House Attention Queue
                         </h2>
                         <p className="mt-1 text-xs text-slate-600">
-                            Only houses without a scan on the selected analysis date are listed, prioritized by historical scan gaps, collection frequency, recurring gaps, and overdue status. “Never” means no scan history was provided in the uploaded data.
+                            “No scan recorded” means no ScanningDates entry appears in available BeatWiseReport history; it does not claim the house was never cleaned. Due means the gap exceeds 1.5 times its usual interval. High priority means no scan is recorded or the gap exceeds 2.5 times its usual interval.
+                        </p>
+                    </div>
+                    <div className="mt-3 grid gap-2 text-sm sm:grid-cols-3">
+                        <p className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-slate-700">
+                            <span className="font-semibold text-slate-900">No scan recorded: </span>{formatNumber(noScanHistoryCount)} houses
+                        </p>
+                        <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-amber-900">
+                            <span className="font-semibold">Due: </span>{formatNumber(dueHouseCount)} houses with scan history
+                        </p>
+                        <p className="rounded-lg border border-red-200 bg-red-50 p-3 text-red-900">
+                            <span className="font-semibold">High priority: </span>{formatNumber(highPriorityHouses.length)} houses (includes no-scan and overdue houses)
                         </p>
                     </div>
                     <div className="mt-3 max-h-[34rem] overflow-auto rounded border border-slate-200">
@@ -517,10 +674,10 @@ export default function EmployeeApiDashboard({
                                         <td className="p-3 font-medium text-slate-900">{item.detail.house.houseId}</td>
                                         <td className="p-3">{item.lastScannedDate
                                             ? formatDate(item.lastScannedDate)
-                                            : item.priorityLabel.includes("no scan history") ? "Never" : "No scan by selected date"}
+                                            : !item.detail.collectionDates.length ? "No scan recorded" : "No scan by selected date"}
                                         </td>
                                         <td className="p-3">{item.daysSinceScan == null
-                                            ? item.priorityLabel.includes("no scan history") ? "Never" : "—"
+                                            ? !item.detail.collectionDates.length ? "No scan recorded" : "—"
                                             : formatDays(item.daysSinceScan)}
                                         </td>
                                         <td className="p-3">{item.frequency}</td>
@@ -529,7 +686,7 @@ export default function EmployeeApiDashboard({
                                     </tr>
                                 ))}
                                 {!nextCollectionPriorities.length && (
-                                    <EmptyRow columns={6}>No houses currently meet the existing priority or attention criteria.</EmptyRow>
+                                    <EmptyRow columns={6}>No houses currently meet the historical attention criteria.</EmptyRow>
                                 )}
                             </tbody>
                         </table>
@@ -641,36 +798,42 @@ export default function EmployeeApiDashboard({
                 <section className="rounded-xl bg-white p-4 shadow-sm">
                     <div>
                         <h2 className="text-lg font-semibold text-slate-900">
-                            Selected-Day Collection Output vs Previous 5 Days
+                            Daily Attendance &amp; Collection
                         </h2>
                         <p className="mt-1 text-xs text-slate-600">
-                            Compares unique houses collected by the assigned employee on {formatDate(effectiveEndDate)} with the highest daily count in the five calendar days before it. This is an observed recent high, not guaranteed capacity.
+                            Compares {formatDate(effectiveEndDate)} with the immediately previous day. Attendance follows your rule: no GPS points means Absent.
                         </p>
                     </div>
-                    <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                    <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
                         <Card
-                            label={`Collected by employee · ${formatDate(effectiveEndDate)}`}
-                            value={`${formatNumber(selectedDayHouseCount)} houses`}
-                            detail="Distinct HouseIds in this Beat scanned by the assigned employee."
+                            label={`Attendance · ${formatDate(effectiveEndDate)}`}
+                            value={dailyEmployeeReport?.selectedDateAttendance || "Unavailable"}
+                            tone={dailyEmployeeReport?.selectedDateAttendance === "Present" ? "text-green-700" : "text-red-700"}
+                            detail={dailyEmployeeReport?.selectedDateAttendance === "Absent"
+                                ? `Absent by GPS rule · ${formatNumber(dailyEmployeeReport?.selectedDateGpsPointCount || 0)} GPS points recorded.`
+                                : `${formatNumber(dailyEmployeeReport?.selectedDateGpsPointCount || 0)} GPS points recorded.`}
                         />
                         <Card
-                            label="Best observed in previous 5 days"
-                            value={previousFiveDayPeak
-                                ? `${formatNumber(previousFiveDayPeak.count)} houses`
-                                : "Unavailable"}
-                            detail={previousFiveDayPeak
-                                ? `${formatNumber(recentCollectionOutput.previousDaysWithScans)} previous day(s) had identified employee scans.`
-                                : "No identified assigned-employee scans in those dates."}
+                            label={`Yesterday · ${formatDate(dailyEmployeeReport?.previousDate)}`}
+                            value={dailyEmployeeReport?.previousDateAttendance || "Unavailable"}
+                            tone={dailyEmployeeReport?.previousDateAttendance === "Present" ? "text-green-700" : "text-red-700"}
+                            detail={`${formatNumber(dailyEmployeeReport?.previousDateGpsPointCount || 0)} GPS points recorded; no GPS means Absent.`}
                         />
                         <Card
-                            label="Compared with recent high"
-                            value={recentPeakComparison}
-                            tone={housesBelowRecentPeak > 0
-                                ? "text-amber-700"
-                                : housesBelowRecentPeak == null
-                                    ? "text-slate-900"
-                                    : "text-green-700"}
-                            detail="Difference from the previous five-day observed high; not a performance verdict by itself."
+                            label="Houses collected · selected day"
+                            value={`${formatNumber(dailyEmployeeReport?.selectedDateHouseCount || 0)} houses`}
+                            detail="Unique HouseIds scanned by the assigned employee."
+                        />
+                        <Card
+                            label="Houses collected · yesterday"
+                            value={`${formatNumber(dailyEmployeeReport?.previousDateHouseCount || 0)} houses`}
+                            detail="Unique HouseIds scanned on the previous calendar day."
+                        />
+                        <Card
+                            label="Change vs yesterday"
+                            value={`${dailyHouseCountChange > 0 ? "+" : ""}${formatNumber(dailyHouseCountChange)} houses`}
+                            tone={dailyHouseCountChange > 0 ? "text-green-700" : dailyHouseCountChange < 0 ? "text-amber-700" : "text-slate-900"}
+                            detail="Difference in unique assigned-employee house scans."
                         />
                     </div>
                 </section>
@@ -696,32 +859,40 @@ export default function EmployeeApiDashboard({
                         <Card
                             label="Previous coverage"
                             value={coverageTrend.previousPercent == null
-                                ? "Insufficient data"
+                                ? "Unavailable"
                                 : `${formatNumber(coverageTrend.previousPercent, 1)}%`}
-                            detail={previousWindowStartDate && previousWindowEndDate
+                            detail={!previousWindowIsAvailable
+                                ? "Previous-period comparison unavailable for this reporting range."
+                                : previousWindowStartDate && previousWindowEndDate
                                 ? `${formatDate(previousWindowStartDate)} to ${formatDate(previousWindowEndDate)}`
-                                : "Previous reporting window unavailable"}
+                                : "Previous-period comparison unavailable for this reporting range."}
                         />
                         <Card
                             label="Current coverage"
                             value={coverageTrend.currentPercent == null
-                                ? "Insufficient data"
+                                ? "Unavailable"
                                 : `${formatNumber(coverageTrend.currentPercent, 1)}%`}
                             detail={`${formatDate(effectiveStartDate)} to ${formatDate(effectiveEndDate)}`}
                         />
                         <Card
                             label="Change"
                             value={coverageTrend.changePercentagePoints == null
-                                ? "Insufficient data"
+                                ? "Unavailable"
                                 : `${coverageTrend.changePercentagePoints > 0 ? "+" : ""}${formatNumber(coverageTrend.changePercentagePoints, 1)} pp`}
-                            detail="Percentage-point change between windows"
+                            detail={!previousWindowIsAvailable
+                                ? "Previous-period comparison unavailable for this reporting range."
+                                : "Percentage-point change between equal-length windows"}
                         />
                         <Card
                             label="Trend"
-                            value={coverageTrend.trend}
-                            detail={coverageTrend.trend === "Insufficient data"
-                                ? "Verified collection data is needed in both windows."
-                                : "Based only on recorded collection coverage."}
+                            value={coverageTrend.trend === "Insufficient data"
+                                ? "Unavailable"
+                                : coverageTrend.trend}
+                            detail={!previousWindowIsAvailable
+                                ? "Previous-period comparison unavailable for this reporting range."
+                                : coverageTrend.trend === "Insufficient data"
+                                    ? "Coverage data is unavailable for this comparison."
+                                    : "Based only on recorded collection coverage."}
                             tone={coverageTrend.trend === "Improving"
                                 ? "text-green-700"
                                 : coverageTrend.trend === "Declining"
@@ -735,7 +906,7 @@ export default function EmployeeApiDashboard({
                     <div>
                         <h2 id="collection-pattern-heading" className="text-lg font-semibold text-slate-900">Collection Pattern</h2>
                         <p className="mt-1 text-xs text-slate-600">
-                            A concise summary of patterns in the selected {reportWindowLabel}; recorded gaps are not proof that a house was deliberately skipped.
+                            A concise summary of complete available ScanningDates history through the selected date; recorded gaps are not proof that a house was deliberately skipped.
                         </p>
                     </div>
                     <ul className="mt-3 grid gap-3 sm:grid-cols-2">
@@ -745,9 +916,9 @@ export default function EmployeeApiDashboard({
                         </li>
                         <li className="rounded-lg border border-slate-200 p-3 text-sm text-slate-700">
                             <span className="font-semibold text-slate-900">Lower collection frequency: </span>
-                            {houseCoverage.typicalScanCount == null
+                            {historicalHouseCoverage.typicalScanCount == null
                                 ? "Insufficient data to establish a Beat frequency baseline."
-                                : `${formatNumber(collectionPatterns.lowFrequency)} houses are below the existing Beat frequency baseline of ${formatNumber(houseCoverage.typicalScanCount, 1)} scans per house.`}
+                                : `${formatNumber(collectionPatterns.lowFrequency)} houses are below the existing Beat frequency baseline of ${formatNumber(historicalHouseCoverage.typicalScanCount, 1)} scans per house.`}
                         </li>
                         <li className="rounded-lg border border-slate-200 p-3 text-sm text-slate-700">
                             <span className="font-semibold text-slate-900">Recurring long gaps: </span>
@@ -756,16 +927,90 @@ export default function EmployeeApiDashboard({
                                 : "Insufficient data to assess recurring collection gaps."}
                         </li>
                         <li className="rounded-lg border border-slate-200 p-3 text-sm text-slate-700">
-                            <span className="font-semibold text-slate-900">No recorded collection in this window: </span>
-                            {formatNumber(collectionPatterns.noRecordedCollection)} houses. This does not establish that they were skipped.
+                            <span className="font-semibold text-slate-900">No scan recorded in available report history: </span>
+                            {formatNumber(collectionPatterns.noRecordedCollection)} houses have no recorded collection dates. This does not establish that a house was never cleaned.
                         </li>
                         <li className="rounded-lg border border-slate-200 p-3 text-sm text-slate-700 sm:col-span-2">
                             <span className="font-semibold text-slate-900">Period concentration: </span>
                             {collectionPatterns.busiestMonth
                                 ? `Activity was highest in ${formatMonth(collectionPatterns.busiestMonth.month)} (${formatNumber(collectionPatterns.busiestMonth.houseDays)} recorded house-days).`
-                                : "Insufficient data; recorded activity across at least two months is needed to compare periods."}
+                                : "Not enough historical periods available."}
                         </li>
                     </ul>
+                </section>
+
+                <section aria-labelledby="anomaly-detection-heading" className="rounded-xl bg-white p-4 shadow-sm">
+                    <div>
+                        <h2 id="anomaly-detection-heading" className="text-lg font-semibold text-slate-900">
+                            Anomaly Detection
+                        </h2>
+                        <p className="mt-1 text-xs text-slate-600">
+                            Deterministic comparisons of recorded activity with recent and house-specific historical patterns. An anomaly signals a pattern for attention; it does not imply misconduct.
+                        </p>
+                    </div>
+                    {anomalyLoading && (
+                        <p role="status" className="mt-3 text-sm text-slate-600">
+                            Comparing recorded activity with historical patterns…
+                        </p>
+                    )}
+                    {anomalyError && (
+                        <p role="alert" className="mt-3 rounded border border-red-300 bg-red-50 p-3 text-sm text-red-800">
+                            Anomaly analysis is unavailable: {anomalyError}
+                        </p>
+                    )}
+                    {anomalyResult && (
+                        <>
+                            {anomalyResult.anomalies.length === 0 && anomalyResult.insufficient_data.length === 0 && (
+                                <p className="mt-3 rounded border border-slate-200 bg-slate-50 p-3 text-sm font-medium text-slate-700">
+                                    No significant anomalies detected.
+                                </p>
+                            )}
+                            {anomalyResult.insufficient_data.length > 0 && (
+                                <div className="mt-3 rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                                    <p className="font-medium">Insufficient data for these checks:</p>
+                                    <ul className="mt-1 list-inside list-disc">
+                                        {anomalyResult.insufficient_data.map((reason) => <li key={reason}>{reason}</li>)}
+                                    </ul>
+                                </div>
+                            )}
+                            {anomalyResult.anomalies.length > 0 && (
+                                <div className="mt-3 overflow-auto rounded border border-slate-200">
+                                    <table className="w-full min-w-[900px] text-left text-sm">
+                                        <thead className="bg-slate-50 text-xs font-semibold text-slate-600">
+                                            <tr>
+                                                <th className="p-3">Anomaly type</th>
+                                                <th className="p-3">Current pattern/value</th>
+                                                <th className="p-3">Normal/historical pattern</th>
+                                                <th className="p-3">Severity</th>
+                                                <th className="p-3">Reason</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {anomalyResult.anomalies.map((anomaly) => (
+                                                <tr key={anomaly.type} className="border-t border-slate-100 align-top">
+                                                    <td className="p-3 font-medium text-slate-900">{anomaly.type}</td>
+                                                    <td className="p-3 text-slate-700">{anomaly.current_pattern}</td>
+                                                    <td className="p-3 text-slate-700">{anomaly.normal_pattern}</td>
+                                                    <td className="p-3">
+                                                        <span className={`inline-flex rounded-full px-2 py-1 text-xs font-semibold ${
+                                                            anomaly.severity === "High"
+                                                                ? "bg-red-100 text-red-800"
+                                                                : anomaly.severity === "Medium"
+                                                                    ? "bg-amber-100 text-amber-800"
+                                                                    : "bg-blue-100 text-blue-800"
+                                                        }`}>
+                                                            {anomaly.severity}
+                                                        </span>
+                                                    </td>
+                                                    <td className="p-3 text-slate-700">{anomaly.reason}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
+                        </>
+                    )}
                 </section>
             </div>
         </div>

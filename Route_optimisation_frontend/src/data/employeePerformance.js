@@ -50,7 +50,7 @@ export function getReportWindowDays(fromDate, toDate) {
     return Math.floor((end - start) / 86400000) + 1;
 }
 
-export function summarizeRecentEmployeeCollectionOutput(coverage, selectedDate) {
+export function summarizeDailyEmployeeReport(coverage, routes, selectedDate) {
     if (!coverage?.details || !selectedDate) return null;
 
     const houseIdsByDate = new Map();
@@ -62,25 +62,31 @@ export function summarizeRecentEmployeeCollectionOutput(coverage, selectedDate) 
         });
     });
 
-    const previousDates = Array.from({length: 5}, (_, index) =>
-        addDays(selectedDate, -(index + 1))
-    ).filter(Boolean);
-    const previousDaysWithScans = previousDates
-        .map((date) => ({date, count: houseIdsByDate.get(date)?.size || 0}))
-        .filter(({count}) => count > 0);
-    const previousBest = previousDaysWithScans.reduce((best, current) =>
-        !best || current.count > best.count ? current : best,
-    null);
+    const previousDate = addDays(selectedDate, -1);
+    const gpsPointsForDate = (date) => (routes || [])
+        .filter((route) => route.date === date)
+        .reduce((total, route) => total + (route.trackPoints?.length || 0), 0);
+    const selectedDateGpsPointCount = gpsPointsForDate(selectedDate);
+    const previousDateGpsPointCount = gpsPointsForDate(previousDate);
+    const selectedDateHouseCount = houseIdsByDate.get(selectedDate)?.size || 0;
+    const previousDateHouseCount = houseIdsByDate.get(previousDate)?.size || 0;
 
     return {
-        selectedDateHouseCount: houseIdsByDate.get(selectedDate)?.size || 0,
-        previousFiveDayPeak: previousBest,
-        previousDaysWithScans: previousDaysWithScans.length,
+        selectedDate,
+        previousDate,
+        selectedDateHouseCount,
+        previousDateHouseCount,
+        houseCountChange: selectedDateHouseCount - previousDateHouseCount,
+        selectedDateGpsPointCount,
+        previousDateGpsPointCount,
+        selectedDateAttendance: selectedDateGpsPointCount > 0 ? "Present" : "Absent",
+        previousDateAttendance: previousDateGpsPointCount > 0 ? "Present" : "Absent",
     };
 }
 
 export function analyzeOutsideBeatCollections(routes, otherBeats, assignedEmployeeId, fromDate, toDate) {
     const housesByBeat = new Map();
+    const housesByDate = new Map();
     let unmatchedScanCount = 0;
     const housesByReference = new Map();
     otherBeats.forEach((beat) => {
@@ -106,6 +112,9 @@ export function analyzeOutsideBeatCollections(routes, otherBeats, assignedEmploy
             const houses = housesByBeat.get(beat.id) || new Set();
             houses.add(house.houseId);
             housesByBeat.set(beat.id, houses);
+            const dateHouses = housesByDate.get(route.date) || new Set();
+            dateHouses.add(house.houseId);
+            housesByDate.set(route.date, dateHouses);
         });
     });
 
@@ -120,6 +129,9 @@ export function analyzeOutsideBeatCollections(routes, otherBeats, assignedEmploy
     }).sort((a, b) => b.count - a.count);
     return {
         byBeat,
+        byDate: [...housesByDate.entries()]
+            .map(([date, houseIds]) => ({date, houseIds: [...houseIds].sort()}))
+            .sort((a, b) => a.date.localeCompare(b.date)),
         totalHouses: byBeat.reduce((total, item) => total + item.count, 0),
         unmatchedScanCount,
     };
@@ -273,6 +285,7 @@ export function analyzeHouseCoverage(houses, routes, fromDate, toDate, assignedE
             collectionDays: collectionDates.length,
             assignedEmployeeCollectionDays: assignedDates.size,
             assignedCollectionDates: [...assignedDates].sort(),
+            otherEmployeeCollectionDates: [...otherDates].sort(),
             assignedEmployeeScanCount: assignedEvents.length,
             otherEmployeeCollectionDays: otherDates.size,
             otherEmployeeScanCount: otherEvents.length,
@@ -379,41 +392,33 @@ function lastScanOnOrBefore(detail, endDate) {
     return dates.sort().at(-1) || null;
 }
 
-export function getNextCollectionPriorities(coverage, reportWindowDays, endDate, highPriorityHouses = []) {
-    const highPriorityHouseIds = new Set(
-        highPriorityHouses.map(({detail}) => detail.house.houseId),
-    );
+export function getNextCollectionPriorities(coverage, endDate) {
     return coverage.details.map((detail) => {
         const lastScannedDate = lastScanOnOrBefore(detail, endDate);
-        if (endDate && lastScannedDate === endDate) return null;
-
         const daysSinceScan = daysSince(lastScannedDate, endDate);
-        const neverScanned = !detail.house.history?.collectionDates?.length &&
-            !detail.house.scanningDate;
-        const noScanByDate = !lastScannedDate;
-        const existingHighPriority = highPriorityHouseIds.has(detail.house.houseId);
-        const longGap = daysSinceScan != null && daysSinceScan >= 7;
-        const recurringLongGaps = detail.repeatedLongGaps >= 2;
-        const priority = neverScanned || noScanByDate || existingHighPriority || longGap ||
-            detail.isLowFrequency || recurringLongGaps ||
-            detail.status === "Overdue" || detail.status === "Needs Attention";
+        // The coverage is already capped at endDate. Do not let a later scan
+        // make a house look as though it had been scanned on this historical date.
+        const neverScanned = !(detail.collectionDates || []).length;
+        const hasHistoryThroughDate = (detail.collectionDays || 0) > 0;
+        const overdue = detail.status === "Overdue";
+        const significantlyOverdue = hasHistoryThroughDate &&
+            daysSinceScan != null &&
+            detail.typicalIntervalDays != null &&
+            daysSinceScan > detail.typicalIntervalDays * 2.5;
+        const priority = neverScanned || significantlyOverdue || overdue;
         if (!priority) return null;
 
         const priorityLabel = neverScanned
-            ? "Highest — no scan history"
-            : noScanByDate
-                ? "High — no scan by selected date"
-                : existingHighPriority || longGap || detail.status === "Overdue"
-                    ? "High — existing priority status"
-                : recurringLongGaps || detail.status === "Needs Attention"
-                    ? "Medium — recurring gaps"
-                    : "Medium — low frequency";
+            ? "High priority — no scan in report history"
+            : significantlyOverdue
+                ? "High priority — overdue"
+                : overdue
+                    ? "Due — collection interval exceeded"
+                    : "Due";
         const reason = neverScanned
-            ? "No collection scan history is available for this house."
-            : noScanByDate
-                ? "No scan was recorded on or before the selected analysis date."
-                : (existingHighPriority || longGap) && daysSinceScan != null
-                ? `${formatElapsedDays(daysSinceScan)} since its last recorded scan.`
+            ? "No ScanningDates entry is present for this house in the selected BeatWiseReport history."
+            : significantlyOverdue || overdue
+                ? `${formatElapsedDays(daysSinceScan)} since its last scan; its normal interval is ${formatElapsedDays(detail.typicalIntervalDays)}.`
                 : detail.attentionReason;
 
         return {
@@ -422,15 +427,12 @@ export function getNextCollectionPriorities(coverage, reportWindowDays, endDate,
             daysSinceScan,
             priorityLabel,
             reason,
-            frequency: detail.recordedScanCount === 0
-                ? reportWindowDays == null
-                    ? "No scans in the reporting window"
-                    : `No scans in the ${formatElapsedDays(reportWindowDays)} reporting window`
-                : `${detail.recordedScanCount} scans across ${detail.collectionDays} collection days`,
+            frequency: neverScanned
+                ? "No scans in available history"
+                : `${detail.recordedScanCount} scans across ${detail.collectionDays} historical collection days`,
             priorityRank: neverScanned ? 5
-                : noScanByDate ? 4
-                    : existingHighPriority || longGap || detail.status === "Overdue" ? 3
-                    : recurringLongGaps || detail.status === "Needs Attention" ? 2 : 1,
+                : significantlyOverdue ? 4
+                    : overdue ? 2 : 1,
         };
     }).filter(Boolean).sort((a, b) =>
         b.priorityRank - a.priorityRank ||
@@ -440,8 +442,12 @@ export function getNextCollectionPriorities(coverage, reportWindowDays, endDate,
     );
 }
 
+export function getHighPriorityAttentionHouses(attentionHouses) {
+    return attentionHouses.filter((item) => item.priorityRank >= 3);
+}
+
 export function getCoverageTrend(previousCoverage, currentCoverage, totalHouses) {
-    const getPercent = (coverage) => coverage?.collectedAtLeastOnce > 0 && totalHouses > 0
+    const getPercent = (coverage) => coverage && totalHouses > 0
         ? coverage.collectedAtLeastOnce * 100 / totalHouses
         : null;
     const previousPercent = getPercent(previousCoverage);
@@ -488,7 +494,7 @@ export function summarizeCollectionPatterns(coverage) {
         repeatedlyCollected: details.filter((detail) => detail.collectionDays > 1).length,
         lowFrequency: details.filter((detail) => detail.isLowFrequency).length,
         recurringLongGaps: details.filter((detail) => detail.repeatedLongGaps >= 2).length,
-        noRecordedCollection: details.filter((detail) => detail.collectionDays === 0).length,
+        noRecordedCollection: details.filter((detail) => !(detail.collectionDates || []).length).length,
         busiestMonth: busiestMonth
             ? {month: busiestMonth[0], houseDays: busiestMonth[1]}
             : null,

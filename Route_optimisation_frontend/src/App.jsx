@@ -65,48 +65,70 @@ export default function App() {
     };
 
     return (
-        <div className="flex h-screen min-h-0 flex-col">
-            <nav className="flex shrink-0 flex-nowrap gap-2 overflow-x-auto border-b bg-white px-4 py-2">
-                <button
-                    type="button"
-                    onClick={() => setActivePlanner("route")}
-                    className={`shrink-0 rounded px-4 py-2 text-sm font-medium ${activePlanner === "route" ? "bg-blue-700 text-white" : "text-slate-700 hover:bg-slate-100"}`}
-                >
-                    Route Optimization
-                </button>
-                <button
-                    type="button"
-                    onClick={() => setActivePlanner("analytics")}
-                    className={`shrink-0 rounded px-4 py-2 text-sm font-medium ${activePlanner === "analytics" ? "bg-blue-700 text-white" : "text-slate-700 hover:bg-slate-100"}`}
-                >
-                    Employee Performance Analysis
-                </button>
-            </nav>
-            <section className="flex shrink-0 flex-wrap items-center gap-3 border-b bg-slate-50 px-4 py-3">
-                <label className="flex flex-col gap-1 text-sm font-medium text-slate-700">
-                    Upload Beat API files (.json / .txt)
+        <div className="app-shell flex h-screen min-h-0 flex-col">
+            <header className="app-header shrink-0">
+                <div className="app-brand">
+                    <div className="app-brand-mark" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none">
+                            <path d="M4.5 18.5 9 13l3 2.5 7.5-9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                            <circle cx="4.5" cy="18.5" r="1.5" fill="currentColor" />
+                            <circle cx="19.5" cy="6.5" r="1.5" fill="currentColor" />
+                        </svg>
+                    </div>
+                    <div>
+                        <p className="app-brand-title">Beat Operations</p>
+                        <p className="app-brand-subtitle">Route planning & collection insights</p>
+                    </div>
+                </div>
+                <nav className="app-tabs" aria-label="Workspace sections">
+                    <button
+                        type="button"
+                        onClick={() => setActivePlanner("route")}
+                        className={`app-tab ${activePlanner === "route" ? "app-tab-active" : ""}`}
+                        aria-current={activePlanner === "route" ? "page" : undefined}
+                    >
+                        Route Optimization
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => setActivePlanner("analytics")}
+                        className={`app-tab ${activePlanner === "analytics" ? "app-tab-active" : ""}`}
+                        aria-current={activePlanner === "analytics" ? "page" : undefined}
+                    >
+                        Employee Analysis
+                    </button>
+                </nav>
+            </header>
+            <section className="upload-bar shrink-0">
+                <div className="upload-bar-main">
+                    <div className="upload-intro">
+                        <span className="upload-icon" aria-hidden="true">↑</span>
+                        <div>
+                            <p className="upload-title">Beat API data</p>
+                            <p className="upload-caption">JSON or TXT · Data stays in this session</p>
+                        </div>
+                    </div>
+                    <label className="upload-input-wrap">
+                        <span className="sr-only">Upload Beat API files (.json / .txt)</span>
                     <input
                         type="file"
                         accept=".json,.txt,application/json,text/plain"
                         multiple
                         onChange={handleApiFiles}
                         disabled={loadingFile}
-                        className="max-w-sm rounded border border-slate-300 bg-white p-2 text-sm"
+                        className="upload-input"
                     />
-                </label>
-                {!loadingFile && (
-                    <p className="text-xs text-slate-500">
-                        Select multiple files at once or add more later. Beat IDs must be unique across the uploaded files.
-                    </p>
-                )}
-                {loadingFile && <p role="status" className="text-sm text-slate-600">Reading and analyzing files…</p>}
+                    </label>
+                    {loadingFile && <p role="status" className="upload-status">Reading and analyzing files…</p>}
+                </div>
+                <div className="upload-bar-meta">
                 {beatData && !loadingFile && (
-                    <div className="flex flex-wrap items-center gap-2 text-sm text-slate-600">
-                        <span role="status">
+                    <div className="loaded-data-row">
+                        <span className="loaded-data-pill" role="status">
                             Loaded {beatData.beats.length} Beat(s) · {beatData.beats.reduce((total, beat) => total + beat.totalHouses, 0).toLocaleString()} houses
                             · {loadedSources.length} file(s)
                         </span>
-                        <details className="text-xs">
+                        <details className="uploaded-files text-xs">
                             <summary className="cursor-pointer">Uploaded filenames</summary>
                             <ul className="mt-1 list-inside list-disc">
                                 {loadedSources.map((source, index) => <li key={`${source.fileName}-${index}`}>{source.fileName}</li>)}
@@ -121,20 +143,21 @@ export default function App() {
                                 setHighPriorityHouseRequest(null);
                                 setDateSelection(LIVE_DATE);
                             }}
-                            className="rounded border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                            className="clear-data-button"
                         >
                             Clear data
                         </button>
                     </div>
                 )}
                 {!beatData && !loadingFile && (
-                    <p className="text-sm text-slate-500">Upload one or more Beat API files to use the combined data in both tabs.</p>
+                    <p className="upload-hint">Select multiple files, or add files later. Beat IDs must be unique across uploads.</p>
                 )}
                 {uploadError && (
-                    <p role="alert" className="w-full rounded border border-red-300 bg-red-50 p-2 text-sm text-red-800">
+                    <p role="alert" className="upload-error w-full rounded border border-red-300 bg-red-50 p-2 text-sm text-red-800">
                         {uploadError}
                     </p>
                 )}
+                </div>
             </section>
             <main className="min-h-0 flex-1">
                 <div className={`h-full ${activePlanner === "route" ? "" : "hidden"}`}>
