@@ -74,9 +74,19 @@ export default function EmployeeAiReview({summary}) {
                     {review.validationWarning}
                 </p>
             )}
+            {review?.formatWarning && (
+                <p role="status" className="mt-3 rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+                    {review.formatWarning}
+                </p>
+            )}
             {review && (
                 <dl className="mt-4 grid gap-3 sm:grid-cols-2">
-                    {REVIEW_SECTIONS.map(([key, title]) => (
+                    {review.unsectioned ? (
+                        <div className="rounded-lg border border-slate-200 p-3 sm:col-span-2">
+                            <dt className="text-sm font-semibold text-slate-800">Gemini Review</dt>
+                            <dd className="mt-1 whitespace-pre-wrap text-sm text-slate-700">{review.unsectioned}</dd>
+                        </div>
+                    ) : REVIEW_SECTIONS.map(([key, title]) => (
                         <div key={key} className="rounded-lg border border-slate-200 p-3">
                             <dt className="text-sm font-semibold text-slate-800">{title}</dt>
                             <dd className="mt-1 whitespace-pre-wrap text-sm text-slate-700">{review.sections[key]}</dd>

@@ -1,21 +1,10 @@
 const DEFAULT_GEMINI_MODEL = "gemini-3.8-flash";
-
-const reviewSchema = {
-    type: "object",
-    properties: {
-        overallPerformance: {type: "string"},
-        whatIsGoingWell: {type: "string"},
-        needsAttention: {type: "string"},
-        recommendedAction: {type: "string"},
-    },
-    required: [
-        "overallPerformance",
-        "whatIsGoingWell",
-        "needsAttention",
-        "recommendedAction",
-    ],
-    additionalProperties: false,
-};
+const reviewSectionDefinitions = [
+    ["overallPerformance", "Overall Performance"],
+    ["whatIsGoingWell", "What Is Going Well"],
+    ["needsAttention", "Needs Attention"],
+    ["recommendedAction", "Recommended Action"],
+];
 
 const numericWords = /\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|once|twice|half)\b/i;
 
@@ -99,27 +88,52 @@ function hasMisattributedPercentages(text, summary) {
 }
 
 function parseReview(content, summary) {
-    let review;
-    try {
-        review = JSON.parse(content);
-    } catch {
-        throw new Error("Gemini returned a review in an unexpected format. Try again.");
+    const reviewText = content
+        .trim()
+        .replace(/^```(?:text|markdown)?\s*/i, "")
+        .replace(/\s*```$/, "")
+        .trim();
+    const sections = {};
+    let activeSection = null;
+    for (const line of reviewText.split(/\r?\n/)) {
+        const cleanedLine = line.replace(/^#{1,6}\s*/, "").replace(/[*_`]/g, "").trim();
+        const heading = cleanedLine.match(
+            /^(?:[1-4][.)]\s*)?(Overall Performance|What Is Going Well|Needs Attention|Recommended Action)(?:\s*:\s*(.*))?$/i,
+        );
+        if (heading) {
+            activeSection = reviewSectionDefinitions.find(([, title]) =>
+                title.toLowerCase() === heading[1].toLowerCase()
+            )?.[0] || null;
+            if (activeSection && heading[2]) {
+                sections[activeSection] = [sections[activeSection], heading[2].trim()]
+                    .filter(Boolean)
+                    .join("\n");
+            }
+            continue;
+        }
+        if (activeSection) {
+            sections[activeSection] = [sections[activeSection], line.trim()]
+                .filter(Boolean)
+                .join("\n");
+        }
     }
 
-    const fields = Object.keys(reviewSchema.properties);
-    if (!review || typeof review !== "object" ||
-        Object.keys(review).length !== fields.length ||
-        Object.keys(review).some((field) => !fields.includes(field)) ||
-        fields.some((field) => typeof review[field] !== "string" || !review[field].trim())) {
-        throw new Error("Gemini returned an unexpected four-section review format. Try again.");
-    }
+    const hasAllSections = reviewSectionDefinitions.every(([field]) => sections[field]?.trim());
+    const unsectioned = hasAllSections ? null : reviewText;
+    const reviewedText = hasAllSections
+        ? reviewSectionDefinitions.map(([field]) => sections[field]).join("\n")
+        : reviewText;
     const allowedNumbers = collectAllowedNumbers(summary);
-    const hasUnverifiedClaim = fields.some((field) =>
-        hasUnverifiedNumbers(review[field], allowedNumbers) ||
-        hasMisattributedPercentages(review[field], summary)
-    );
+    const hasUnverifiedClaim = hasUnverifiedNumbers(reviewedText, allowedNumbers) ||
+        hasMisattributedPercentages(reviewedText, summary);
     return {
-        sections: Object.fromEntries(fields.map((field) => [field, review[field].trim()])),
+        sections: hasAllSections
+            ? Object.fromEntries(reviewSectionDefinitions.map(([field]) => [field, sections[field].trim()]))
+            : {},
+        unsectioned,
+        formatWarning: hasAllSections
+            ? null
+            : "Gemini did not return all four section headings, so its full response is shown below.",
         validationWarning: hasUnverifiedClaim
             ? "The AI review is shown as generated, but some numeric claims could not be verified. Use the dashboard figures as authoritative."
             : null,
@@ -152,28 +166,29 @@ export async function generateGeminiEmployeeReview(
                     systemInstruction: {
                         parts: [{
                             text: [
-                            "You are an Employee Collection Performance Reviewer.",
-                            "Review the verified employee house-collection data provided below.",
-                            "Your job is only to explain the results in simple, professional language.",
-                            "Do not calculate, change, or invent any numbers. Use only the information provided.",
-                            "Do not assume that every house must be scanned every day.",
-                            "Return exactly these sections, in this order: 1. Overall Performance; 2. What Is Going Well; 3. Needs Attention; 4. Recommended Action.",
-                            "Focus on Beat coverage, houses collected by the assigned employee, houses collected by other employees, uncollected houses, collection frequency, long collection gaps, houses requiring attention, and outside-Beat collection.",
-                            "Beat coverage includes collection by both the assigned employee and other employees; never describe the assigned employee's count as total Beat coverage.",
-                            "Use each count only for the category named in its field. Do not compare counts, infer a majority, or express counts as a ratio or 'x out of y'.",
-                            "Use the supplied Beat coverage and collection-pattern percentages as written; do not derive or restate percentages from counts.",
-                            "Keep each percentage attached to its exact definition and denominator: Beat coverage refers to housesWithAnyCollection among totalHousesInBeat; withinObservedPatternPercent refers only to housesWithCollectionHistory.",
-                            "Whenever you mention withinObservedPatternPercent, explicitly state that it is among houses with collection history.",
-                            "Do not describe a percentage as applying to all houses or to a different employee/category than its definition states.",
-                            "Do not call a count a majority, significant portion, strong performance, or poor performance unless that exact assessment is explicitly supplied.",
-                            "In Overall Performance, report Beat coverage, assigned-employee collections, other-employee collections, and uncollected houses under their separate labels.",
-                            "In What Is Going Well, describe only recorded regular-collection counts or the observed-pattern percentage with its stated denominator.",
-                            "In Needs Attention, describe low-frequency houses, long gaps, overdue houses, high-priority houses, and uncollected houses using their own labels; do not imply these categories are additive or distinct.",
-                            "In Recommended Action, refer only to categories present in the summary; do not invent house IDs, routes, areas, or causes.",
-                            "Only repeat numeric values exactly as supplied and with their original meaning; otherwise omit them.",
-                            "Treat null values as unavailable and do not make claims or recommendations based on them.",
-                            "Do not infer causes, routes, or house-level facts that are absent from the summary.",
-                            "Return only the four JSON string fields defined by the response schema; the interface supplies the numbered section headings.",
+                                "You are an Employee Collection Performance Reviewer.",
+                                "Review the verified employee house-collection data provided below.",
+                                "Your job is only to explain the results in simple, professional language.",
+                                "Do not calculate, change, or invent any numbers. Use only the information provided.",
+                                "Do not assume that every house must be scanned every day.",
+                                "Return exactly these sections, in this order: 1. Overall Performance; 2. What Is Going Well; 3. Needs Attention; 4. Recommended Action.",
+                                "Focus on Beat coverage, houses collected by the assigned employee, houses collected by other employees, uncollected houses, collection frequency, long collection gaps, houses requiring attention, and outside-Beat collection.",
+                                "Beat coverage includes collection by both the assigned employee and other employees; never describe the assigned employee's count as total Beat coverage.",
+                                "Use each count only for the category named in its field. Do not compare counts, infer a majority, or express counts as a ratio or 'x out of y'.",
+                                "Use the supplied Beat coverage and collection-pattern percentages as written; do not derive or restate percentages from counts.",
+                                "Keep each percentage attached to its exact definition and denominator: Beat coverage refers to housesWithAnyCollection among totalHousesInBeat; withinObservedPatternPercent refers only to housesWithCollectionHistory.",
+                                "Whenever you mention withinObservedPatternPercent, explicitly state that it is among houses with collection history.",
+                                "Do not describe a percentage as applying to all houses or to a different employee/category than its definition states.",
+                                "Do not call a count a majority, significant portion, strong performance, or poor performance unless that exact assessment is explicitly supplied.",
+                                "In Overall Performance, report Beat coverage, assigned-employee collections, other-employee collections, and uncollected houses under their separate labels.",
+                                "In What Is Going Well, describe only recorded regular-collection counts or the observed-pattern percentage with its stated denominator.",
+                                "In Needs Attention, describe low-frequency houses, long gaps, overdue houses, high-priority houses, and uncollected houses using their own labels; do not imply these categories are additive or distinct.",
+                                "In Recommended Action, refer only to categories present in the summary; do not invent house IDs, routes, areas, or causes.",
+                                "Only repeat numeric values exactly as supplied and with their original meaning; otherwise omit them.",
+                                "Treat null values as unavailable and do not make claims or recommendations based on them.",
+                                "Do not infer causes, routes, or house-level facts that are absent from the summary.",
+                                "Write a plain-text review with exactly these four section headings, each on its own line: 1. Overall Performance; 2. What Is Going Well; 3. Needs Attention; 4. Recommended Action.",
+                                "Do not return JSON, code fences, or text outside the four sections.",
                             ].join(" "),
                         }],
                     },
@@ -182,14 +197,6 @@ export async function generateGeminiEmployeeReview(
                         parts: [{text: `Verified Data:\n${JSON.stringify(summary, null, 2)}`}],
                     }],
                     generationConfig: {
-                        responseMimeType: "application/json",
-                        responseSchema: {
-                            type: "OBJECT",
-                            properties: Object.fromEntries(
-                                Object.keys(reviewSchema.properties).map((field) => [field, {type: "STRING"}]),
-                            ),
-                            required: reviewSchema.required,
-                        },
                         temperature: 0.1,
                         maxOutputTokens: 400,
                     },
@@ -223,7 +230,7 @@ export async function generateGeminiEmployeeReview(
     const content = result?.candidates?.[0]?.content?.parts
         ?.map((part) => part.text || "")
         .join("");
-    if (typeof content !== "string") {
+    if (typeof content !== "string" || !content.trim()) {
         throw new Error("Gemini returned no review. Try again.");
     }
     return parseReview(content, summary);

@@ -40,15 +40,28 @@ function generateReview(summaryValue, options = {}) {
 }
 
 function responseWithReview(review) {
+    const labels = {
+        overallPerformance: "1. Overall Performance",
+        whatIsGoingWell: "2. What Is Going Well",
+        needsAttention: "3. Needs Attention",
+        recommendedAction: "4. Recommended Action",
+    };
+    const content = Object.entries(labels)
+        .map(([key, label]) => `${label}\n${review[key]}`)
+        .join("\n\n");
+    return responseWithText(content);
+}
+
+function responseWithText(text) {
     return {
         ok: true,
         json: async () => ({
-            candidates: [{content: {parts: [{text: JSON.stringify(review)}]}}],
+            candidates: [{content: {parts: [{text}]}}],
         }),
     };
 }
 
-test("sends the calculated summary to Gemini and parses the four review sections", async () => {
+test("sends the calculated summary to Gemini and displays four plain-text sections", async () => {
     let requestUrl;
     let requestOptions;
     let requestBody;
@@ -69,19 +82,45 @@ test("sends the calculated summary to Gemini and parses the four review sections
     assert.match(requestBody.systemInstruction.parts[0].text, /You are an Employee Collection Performance Reviewer/);
     assert.match(requestBody.systemInstruction.parts[0].text, /Do not assume that every house must be scanned every day/);
     assert.match(requestBody.systemInstruction.parts[0].text, /long collection gaps/);
+    assert.match(requestBody.systemInstruction.parts[0].text, /Do not return JSON/);
     assert.equal(
         requestBody.contents[0].parts[0].text,
         `Verified Data:\n${JSON.stringify(summary, null, 2)}`,
     );
-    assert.equal(requestBody.generationConfig.responseMimeType, "application/json");
-    assert.deepEqual(requestBody.generationConfig.responseSchema.required, [
-        "overallPerformance",
-        "whatIsGoingWell",
-        "needsAttention",
-        "recommendedAction",
-    ]);
+    assert.equal(requestBody.generationConfig.responseMimeType, undefined);
+    assert.equal(requestBody.generationConfig.responseSchema, undefined);
     assert.deepEqual(review.sections, validReview);
+    assert.equal(review.unsectioned, null);
     assert.equal(review.validationWarning, null);
+});
+
+test("shows Gemini's full response when it does not return all section headings", async () => {
+    const content = "The employee has recorded activity across the selected Beat.";
+    const review = await generateReview(summary, {
+        fetchImpl: async () => responseWithText(content),
+    });
+
+    assert.deepEqual(review.sections, {});
+    assert.equal(review.unsectioned, content);
+    assert.match(review.formatWarning, /full response is shown/);
+});
+
+test("parses Markdown-formatted section headings", async () => {
+    const review = await generateReview(summary, {
+        fetchImpl: async () => responseWithText([
+            "## 1. Overall Performance",
+            validReview.overallPerformance,
+            "**2. What Is Going Well**",
+            validReview.whatIsGoingWell,
+            "### 3. Needs Attention",
+            validReview.needsAttention,
+            "4. Recommended Action:",
+            validReview.recommendedAction,
+        ].join("\n")),
+    });
+
+    assert.deepEqual(review.sections, validReview);
+    assert.equal(review.unsectioned, null);
 });
 
 test("displays the review and warns when it contains a number absent from the summary", async () => {
