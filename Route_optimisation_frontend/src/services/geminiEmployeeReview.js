@@ -87,7 +87,7 @@ function hasMisattributedPercentages(text, summary) {
     return false;
 }
 
-function parseReview(content, summary) {
+function parseReview(content, summary, wasTruncated) {
     const reviewText = content
         .trim()
         .replace(/^```(?:text|markdown)?\s*/i, "")
@@ -119,21 +119,24 @@ function parseReview(content, summary) {
     }
 
     const hasAllSections = reviewSectionDefinitions.every(([field]) => sections[field]?.trim());
-    const unsectioned = hasAllSections ? null : reviewText;
-    const reviewedText = hasAllSections
+    const canSeparateSections = hasAllSections && !wasTruncated;
+    const unsectioned = canSeparateSections ? null : reviewText;
+    const reviewedText = canSeparateSections
         ? reviewSectionDefinitions.map(([field]) => sections[field]).join("\n")
         : reviewText;
     const allowedNumbers = collectAllowedNumbers(summary);
     const hasUnverifiedClaim = hasUnverifiedNumbers(reviewedText, allowedNumbers) ||
         hasMisattributedPercentages(reviewedText, summary);
     return {
-        sections: hasAllSections
+        sections: canSeparateSections
             ? Object.fromEntries(reviewSectionDefinitions.map(([field]) => [field, sections[field].trim()]))
             : {},
         unsectioned,
-        formatWarning: hasAllSections
-            ? null
-            : "Gemini did not return all four section headings, so its full response is shown below.",
+        formatWarning: wasTruncated
+            ? "Gemini reached its response limit; the review may be incomplete. Its full response is shown below."
+            : canSeparateSections
+                ? null
+                : "Gemini did not return all four section headings, so its full response is shown below.",
         validationWarning: hasUnverifiedClaim
             ? "The AI review is shown as generated, but some numeric claims could not be verified. Use the dashboard figures as authoritative."
             : null,
@@ -169,6 +172,7 @@ export async function generateGeminiEmployeeReview(
                                 "You are an Employee Collection Performance Reviewer.",
                                 "Review the verified employee house-collection data provided below.",
                                 "Your job is only to explain the results in simple, professional language.",
+                                "Keep each section to one or two concise sentences.",
                                 "Do not calculate, change, or invent any numbers. Use only the information provided.",
                                 "Do not assume that every house must be scanned every day.",
                                 "Return exactly these sections, in this order: 1. Overall Performance; 2. What Is Going Well; 3. Needs Attention; 4. Recommended Action.",
@@ -198,7 +202,7 @@ export async function generateGeminiEmployeeReview(
                     }],
                     generationConfig: {
                         temperature: 0.1,
-                        maxOutputTokens: 400,
+                        maxOutputTokens: 1200,
                     },
                 }),
             },
@@ -227,11 +231,12 @@ export async function generateGeminiEmployeeReview(
     }
 
     const result = await response.json();
-    const content = result?.candidates?.[0]?.content?.parts
+    const candidate = result?.candidates?.[0];
+    const content = candidate?.content?.parts
         ?.map((part) => part.text || "")
         .join("");
     if (typeof content !== "string" || !content.trim()) {
         throw new Error("Gemini returned no review. Try again.");
     }
-    return parseReview(content, summary);
+    return parseReview(content, summary, candidate.finishReason === "MAX_TOKENS");
 }

@@ -52,11 +52,11 @@ function responseWithReview(review) {
     return responseWithText(content);
 }
 
-function responseWithText(text) {
+function responseWithText(text, finishReason = "STOP") {
     return {
         ok: true,
         json: async () => ({
-            candidates: [{content: {parts: [{text}]}}],
+            candidates: [{content: {parts: [{text}]}, finishReason}],
         }),
     };
 }
@@ -83,12 +83,14 @@ test("sends the calculated summary to Gemini and displays four plain-text sectio
     assert.match(requestBody.systemInstruction.parts[0].text, /Do not assume that every house must be scanned every day/);
     assert.match(requestBody.systemInstruction.parts[0].text, /long collection gaps/);
     assert.match(requestBody.systemInstruction.parts[0].text, /Do not return JSON/);
+    assert.match(requestBody.systemInstruction.parts[0].text, /one or two concise sentences/);
     assert.equal(
         requestBody.contents[0].parts[0].text,
         `Verified Data:\n${JSON.stringify(summary, null, 2)}`,
     );
     assert.equal(requestBody.generationConfig.responseMimeType, undefined);
     assert.equal(requestBody.generationConfig.responseSchema, undefined);
+    assert.equal(requestBody.generationConfig.maxOutputTokens, 1200);
     assert.deepEqual(review.sections, validReview);
     assert.equal(review.unsectioned, null);
     assert.equal(review.validationWarning, null);
@@ -103,6 +105,16 @@ test("shows Gemini's full response when it does not return all section headings"
     assert.deepEqual(review.sections, {});
     assert.equal(review.unsectioned, content);
     assert.match(review.formatWarning, /full response is shown/);
+});
+
+test("warns when Gemini marks the review as truncated", async () => {
+    const content = "1. Overall Performance\nThe report covers the selected Beat.";
+    const review = await generateReview(summary, {
+        fetchImpl: async () => responseWithText(content, "MAX_TOKENS"),
+    });
+
+    assert.equal(review.unsectioned, content);
+    assert.match(review.formatWarning, /reached its response limit/);
 });
 
 test("parses Markdown-formatted section headings", async () => {
