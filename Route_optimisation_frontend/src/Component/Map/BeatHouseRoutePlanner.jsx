@@ -7,6 +7,7 @@ import {
     getHighPriorityHouses,
     getReportWindowDays,
 } from "@/data/employeePerformance.js";
+import {createEmployeeGeofence} from "@/data/employeeGeofence.js";
 import {isInsidePolygon} from "@/data/routeBeatData.js";
 
 const startIcon = L.icon({
@@ -56,6 +57,12 @@ const HOUSE_STATUS_STYLES = {
         icon: "/house-icons/not-collected.jpeg",
     },
 };
+
+function serializeGeofence(polygons) {
+    return polygons
+        .map((polygon) => polygon.map(([lat, lon]) => `${lat},${lon}`).join(";"))
+        .join(":");
+}
 
 function getRoutePosition(routePath, progress) {
     if (!routePath?.length) return null;
@@ -441,6 +448,7 @@ function BeatRouteMap({
     showCollectedOnly,
     showHighPriorityOnly,
     highPriorityHouseIds,
+    geofencePreview,
     collectionMappingAvailable,
     isMapMaximized,
     onHouseSelect,
@@ -609,11 +617,12 @@ function BeatRouteMap({
         const optimizerFencePoints = boundaryBeats.flatMap((boundary) =>
             (boundary.optimizerFencePolygons || []).flat()
         );
+        const previewFencePoints = geofencePreview?.polygon || [];
         const employeePoints = employeeRouteLayers.flatMap((item) =>
             sampleTrackPoints(item.trackPoints, 1000).map((point) => [point.lat, point.lon])
         );
-        return [...pathPoints, ...recordedPathPoints, ...housePoints, ...dumpyardPoints, ...endpoints, ...fencePoints, ...optimizerFencePoints, ...employeePoints];
-    }, [beat, boundaryBeats, employeeRouteLayers, houseEntries, recordedRoute, selectedRoute, showHighPriorityOnly, stops, trackPoints]);
+        return [...pathPoints, ...recordedPathPoints, ...housePoints, ...dumpyardPoints, ...endpoints, ...fencePoints, ...optimizerFencePoints, ...previewFencePoints, ...employeePoints];
+    }, [beat, boundaryBeats, employeeRouteLayers, geofencePreview, houseEntries, recordedRoute, selectedRoute, showHighPriorityOnly, stops, trackPoints]);
     const center = bounds[0] || [0, 0];
     const tileUrl = layer === "satellite"
         ? "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
@@ -694,6 +703,21 @@ function BeatRouteMap({
                         />
                     )
                 )
+            )}
+            {geofencePreview?.polygon?.length > 2 && (
+                <Polygon
+                    key={`employee-geofence-preview-${geofencePreview.beatId}`}
+                    positions={geofencePreview.polygon}
+                    pathOptions={{
+                        color: "#7c3aed",
+                        weight: 4,
+                        fillColor: "#7c3aed",
+                        fillOpacity: 0.1,
+                        dashArray: "10 6",
+                    }}
+                >
+                    <Popup>Candidate employee geofence preview</Popup>
+                </Polygon>
             )}
             {employeeRouteLayers.map(({employee, trackPoints, color}) => {
                 const routeLinePoints = sampleTrackPoints(trackPoints, 2000);
@@ -892,6 +916,9 @@ export default function BeatHouseRoutePlanner({
     const [houseSearchQuery, setHouseSearchQuery] = useState("");
     const [houseSearchError, setHouseSearchError] = useState("");
     const [isMapMaximized, setIsMapMaximized] = useState(false);
+    const [geofenceOverrides, setGeofenceOverrides] = useState({});
+    const [geofencePreview, setGeofencePreview] = useState(null);
+    const [geofenceError, setGeofenceError] = useState("");
 
     const beatFiles = beatData?.beats || [];
     const employees = useMemo(() => beatFiles.map((beat, index) => ({
@@ -965,20 +992,41 @@ export default function BeatHouseRoutePlanner({
         ? selectedEmployeeMapping?.beatId || ""
         : selectedBeatId;
     const normalizedBeatId = displayedBeatId.toLowerCase();
-    const beat = displayedBeatId ? beatFiles.find((item) =>
+    const sourceBeat = displayedBeatId ? beatFiles.find((item) =>
         item.id.toLowerCase() === normalizedBeatId ||
         item.beatName.toLowerCase() === normalizedBeatId
     ) || null : null;
+    const overrideFence = sourceBeat ? geofenceOverrides[sourceBeat.id] : null;
+    const effectiveGeofence = overrideFence ? serializeGeofence([overrideFence]) : null;
+    const beat = sourceBeat && overrideFence
+        ? {
+            ...sourceBeat,
+            geofence: effectiveGeofence,
+            optimizerGeofence: effectiveGeofence,
+            fencePoints: overrideFence,
+            fencePolygons: [overrideFence],
+        }
+        : sourceBeat;
     const boundariesToDisplay = useMemo(() => {
         const displayAllBoundaries = selectedEmployeeKey !== ALL_EMPLOYEES || !selectedBeatId;
         const visibleBeats = displayAllBoundaries
             ? beatFiles
             : beatFiles.filter((item) => item.id === selectedBeatId);
-        return visibleBeats.map((item) => ({
-            ...item,
-            employeeColor: employees.find((employee) => employee.beatId === item.id)?.color,
-        }));
-    }, [beatFiles, employees, selectedBeatId, selectedEmployeeKey]);
+        return visibleBeats.map((item) => {
+            const fence = geofenceOverrides[item.id];
+            const serializedFence = fence ? serializeGeofence([fence]) : null;
+            return {
+                ...item,
+                ...(fence ? {
+                    geofence: serializedFence,
+                    optimizerGeofence: serializedFence,
+                    fencePoints: fence,
+                    fencePolygons: [fence],
+                } : {}),
+                employeeColor: employees.find((employee) => employee.beatId === item.id)?.color,
+            };
+        });
+    }, [beatFiles, employees, geofenceOverrides, selectedBeatId, selectedEmployeeKey]);
     const beatBoundaryColor = beat
         ? employeeRouteLayers.find((item) =>
             item.employee.beatId?.toLowerCase() === beat.id.toLowerCase()
@@ -1018,6 +1066,21 @@ export default function BeatHouseRoutePlanner({
             )
             : null,
         [beat, selectedDate],
+    );
+    const assignedEmployeeCollection = useMemo(() => beat
+        ? analyzeHouseCoverage(
+            beat.houses,
+            beat.routes,
+            null,
+            null,
+            beat.assignedEmployee,
+        ).details
+            .filter((detail) => detail.assignedCollectionDates.length > 0)
+            .map((detail) => detail.house)
+        : [], [beat]);
+    const employeeGeofenceCandidate = useMemo(
+        () => createEmployeeGeofence(assignedEmployeeCollection),
+        [assignedEmployeeCollection],
     );
     const selectedRoute = routes.find((route) => route.route_id === selectedRouteId) || null;
     const collectionMappingAvailable = Boolean(beat?.hasHouseIds && day);
@@ -1113,6 +1176,9 @@ export default function BeatHouseRoutePlanner({
     }, [selectedEmployeeKey, activeEmployees]);
 
     React.useEffect(() => {
+        setGeofenceOverrides({});
+        setGeofencePreview(null);
+        setGeofenceError("");
         if (!beatFiles.length) {
             setSelectedBeatId("");
             setSelectedEmployeeKey(ALL_EMPLOYEES);
@@ -1163,6 +1229,46 @@ export default function BeatHouseRoutePlanner({
         setRoutes([]);
         setRecordedRoute(null);
         setSelectedRouteId("");
+    };
+
+    const handleRebuildGeofence = () => {
+        if (!beat) return;
+        const candidate = employeeGeofenceCandidate;
+        if (!candidate.polygon.length) {
+            setGeofencePreview(null);
+            setGeofenceError(
+                assignedEmployeeCollection.length
+                    ? "The assigned employee has collection records, but none have valid map coordinates."
+                    : "No collection history was found for this Beat's assigned employee."
+            );
+            return;
+        }
+
+        setGeofencePreview({
+            beatId: beat.id,
+            ...candidate,
+        });
+        setGeofenceError("");
+    };
+
+    const handleKeepGeofence = () => {
+        if (!beat || !geofencePreview || geofencePreview.beatId !== beat.id) return;
+        if (geofencePreview.outsideHouseIds.length) {
+            setGeofenceError(
+                `${geofencePreview.outsideHouseIds.length} mappable collected house(s) fall outside the candidate. The existing fence was retained.`
+            );
+            return;
+        }
+        setGeofenceOverrides((current) => ({
+            ...current,
+            [beat.id]: geofencePreview.polygon,
+        }));
+        setGeofencePreview(null);
+        setGeofenceError("");
+        clearResults();
+        setNotice(
+            `The new geofence for ${beat.assignedEmployee.name} is active for this session. The uploaded Beat data was not changed.`
+        );
     };
 
     const handleOptimize = async () => {
@@ -1315,6 +1421,8 @@ export default function BeatHouseRoutePlanner({
                                     onChange={(event) => {
                                         const nextBeatId = event.target.value;
                                         setSelectedBeatId(nextBeatId);
+                                        setGeofencePreview(null);
+                                        setGeofenceError("");
                                         setShowCollectedOnly(false);
                                         setShowHighPriorityOnly(false);
                                         setHighPriorityHouseIds(new Set());
@@ -1345,6 +1453,8 @@ export default function BeatHouseRoutePlanner({
                                         if (employeeKey === ALL_EMPLOYEES) {
                                             setSelectedEmployeeKey(ALL_EMPLOYEES);
                                             setSelectedBeatId("");
+                                            setGeofencePreview(null);
+                                            setGeofenceError("");
                                             setShowCollectedOnly(false);
                                             setShowHighPriorityOnly(false);
                                             setHighPriorityHouseIds(new Set());
@@ -1355,6 +1465,8 @@ export default function BeatHouseRoutePlanner({
                                         }
                                         const mapping = activeEmployees.find((item) => item.id === employeeKey);
                                         setSelectedEmployeeKey(employeeKey);
+                                        setGeofencePreview(null);
+                                        setGeofenceError("");
                                         if (mapping?.beatId) setSelectedBeatId(mapping.beatId);
                                         setShowCollectedOnly(false);
                                         setShowHighPriorityOnly(false);
@@ -1495,6 +1607,87 @@ export default function BeatHouseRoutePlanner({
                             {loading ? "Optimizing road routes…" : "Find and compare routes"}
                         </button>
                     </div>
+                    {beat && (
+                        <section className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-4">
+                            <div className="flex flex-wrap items-center justify-between gap-3">
+                                <div>
+                                    <h2 className="font-semibold text-slate-900">Rebuild Beat Geofence</h2>
+                                    <p className="mt-1 text-sm text-slate-600">
+                                        Candidate uses houses with collection history for {beat.assignedEmployee.name} only.
+                                        {" "}{employeeGeofenceCandidate.includedHouseIds.length.toLocaleString()} mappable;{" "}
+                                        {employeeGeofenceCandidate.missingHouseIds.length.toLocaleString()} missing coordinates.
+                                    </p>
+                                </div>
+                                {!geofencePreview || geofencePreview.beatId !== beat.id ? (
+                                    <button
+                                        type="button"
+                                        onClick={handleRebuildGeofence}
+                                        disabled={!assignedEmployeeCollection.length}
+                                        className="rounded-lg border border-violet-300 bg-white px-4 py-2 text-sm font-semibold text-violet-900 hover:bg-violet-50 disabled:cursor-not-allowed disabled:opacity-50"
+                                    >
+                                        Rebuild Beat Geofence
+                                    </button>
+                                ) : null}
+                            </div>
+                            {employeeGeofenceCandidate.missingHouseIds.length > 0 && (
+                                <details className="mt-3 text-sm text-amber-900">
+                                    <summary className="cursor-pointer font-medium">
+                                        Houses missing coordinates ({employeeGeofenceCandidate.missingHouseIds.length})
+                                    </summary>
+                                    <ul className="mt-2 max-h-32 list-inside list-disc overflow-y-auto rounded border border-amber-200 bg-white p-2">
+                                        {employeeGeofenceCandidate.missingHouseIds.map((houseId, index) => (
+                                            <li key={`${houseId}-${index}`}>{houseId}</li>
+                                        ))}
+                                    </ul>
+                                </details>
+                            )}
+                            {geofencePreview?.beatId === beat.id && (
+                                <div role="status" className="mt-3 rounded border border-violet-200 bg-white p-3 text-sm">
+                                    <p className="font-medium text-slate-900">
+                                        Preview: {geofencePreview.includedHouseIds.length.toLocaleString()} mappable houses included.
+                                        {geofencePreview.missingHouseIds.length > 0 &&
+                                            ` ${geofencePreview.missingHouseIds.length.toLocaleString()} collected houses lack coordinates.`}
+                                    </p>
+                                    <p className={geofencePreview.outsideHouseIds.length ? "mt-1 text-red-700" : "mt-1 text-emerald-700"}>
+                                        {geofencePreview.outsideHouseIds.length
+                                            ? `${geofencePreview.outsideHouseIds.length} mappable collected houses are outside the candidate. Keeping is disabled.`
+                                            : "Every mappable house collected by this employee is inside the candidate fence."}
+                                    </p>
+                                    <p className="mt-1 text-xs text-slate-600">
+                                        The dashed violet line is the candidate; the existing fence remains visible until you keep it.
+                                    </p>
+                                    <div className="mt-3 flex flex-wrap gap-2">
+                                        <button
+                                            type="button"
+                                            onClick={handleKeepGeofence}
+                                            disabled={geofencePreview.outsideHouseIds.length > 0}
+                                            className="rounded bg-emerald-700 px-3 py-2 text-sm font-semibold text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-50"
+                                        >
+                                            Keep new fence
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setGeofencePreview(null);
+                                                setGeofenceError("");
+                                            }}
+                                            className="rounded border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-800 hover:bg-slate-100"
+                                        >
+                                            Cancel preview
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+                            {geofenceError && (
+                                <p role="alert" className="mt-3 rounded border border-red-200 bg-red-50 p-2 text-sm text-red-800">
+                                    {geofenceError}
+                                </p>
+                            )}
+                            <p className="mt-2 text-xs text-slate-500">
+                                Keeping applies the fence for this browser session only; the uploaded Beat data is unchanged.
+                            </p>
+                        </section>
+                    )}
                     {selectedEmployee && (
                         <p className="mt-2 text-xs text-slate-600">
                             Selected employee: {selectedEmployee.name} ({selectedEmployee.id}) · Assigned Beat: {selectedEmployee.beatId || "unmapped"} · {beat?.houses.length || 0} houses loaded
@@ -1763,6 +1956,7 @@ export default function BeatHouseRoutePlanner({
                                 showCollectedOnly={showCollectedOnly}
                                 showHighPriorityOnly={showHighPriorityOnly}
                                 highPriorityHouseIds={highPriorityHouseIds}
+                                geofencePreview={geofencePreview?.beatId === beat?.id ? geofencePreview : null}
                                 collectionMappingAvailable={collectionMappingAvailable}
                                 isMapMaximized={isMapMaximized}
                                 optimizationCandidateHouseIds={optimizationCandidateHouseIds}
