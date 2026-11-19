@@ -10,20 +10,10 @@ import {
     summarizeDailyEmployeeReport,
 } from "../data/employeePerformance.js";
 import {API_URL} from "../config.js";
-import {
-    Dialog,
-    DialogContent,
-    DialogDescription,
-    DialogHeader,
-    DialogTitle,
-} from "../components/ui/dialog";
+import AnalysisHouseMapDialog from "./AnalysisHouseMapDialog.jsx";
 
 function formatNumber(value, digits = 0) {
     return Number(value || 0).toLocaleString(undefined, {maximumFractionDigits: digits});
-}
-
-function formatDays(value) {
-    return value == null ? "—" : `${formatNumber(value, 1)} day${value === 1 ? "" : "s"}`;
 }
 
 function formatDate(value) {
@@ -52,14 +42,82 @@ function addDays(date, days) {
         : null;
 }
 
-function Card({label, value, detail, tone = "text-slate-900"}) {
-    return (
-        <article className="rounded-lg border border-slate-200 bg-white p-4">
+function Card({label, value, detail, tone = "text-slate-900", onClick}) {
+    const content = (
+        <>
             <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</p>
             <p className={`mt-2 text-2xl font-bold ${tone}`}>{value}</p>
             {detail && <p className="mt-1 text-xs text-slate-500">{detail}</p>}
+        </>
+    );
+
+    if (onClick) {
+        return (
+            <button
+                type="button"
+                onClick={onClick}
+                className="w-full rounded-lg border border-slate-200 bg-white p-4 text-left transition hover:border-green-300 hover:bg-green-50/40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-green-600"
+            >
+                {content}
+            </button>
+        );
+    }
+
+    return (
+        <article className="rounded-lg border border-slate-200 bg-white p-4">
+            {content}
         </article>
     );
+}
+
+function sortHouseDetails(details, category, assignedEmployeeId = "", scannerId = "") {
+    const firstTimestamp = (detail) => {
+        const candidates = [];
+        if (category !== "other") {
+            (detail.assignedCollectionDates || []).forEach((date) => {
+                candidates.push(Date.parse(`${date}T00:00:00Z`));
+            });
+        }
+        (detail.otherEmployeeCollectionRecords || []).forEach((record) => {
+            if (!scannerId || String(record.scannerId || record.scannerName || "") === String(scannerId)) {
+                candidates.push(record.timestamp);
+            }
+        });
+        (detail.house.historyEvents || []).forEach((event) => {
+            if (category === "own" && String(event.scannerUserId || "") !== String(assignedEmployeeId)) return;
+            if (scannerId && String(event.scannerUserId || event.scannerName || "") !== String(scannerId)) return;
+            candidates.push(Date.parse(event.timestamp || `${event.date}T00:00:00Z`));
+        });
+        const valid = candidates.filter(Number.isFinite);
+        return valid.length ? Math.min(...valid) : Number.POSITIVE_INFINITY;
+    };
+
+    return [...details].sort((a, b) =>
+        firstTimestamp(a) - firstTimestamp(b) ||
+        a.house.houseId.localeCompare(b.house.houseId)
+    );
+}
+
+function toHouseMapRows(details, statusLabel, markerStatus) {
+    return details.map((detail) => ({
+        house: detail.house,
+        statusLabel: statusLabel || ({
+            own: "Collected by assigned employee",
+            other: "Collected by another employee",
+            remaining: "Not collected in this period",
+        }[detail.collectionCategory] || detail.status || "House in this Beat"),
+        lastScannedDate: detail.lastRecordedDate || null,
+        scannerName: detail.latestScannerName || null,
+        beatName: detail.latestScannerBeatName || null,
+        detailText: detail.attentionReason || null,
+        currentGapDays: detail.currentGapDays,
+        typicalIntervalDays: detail.typicalIntervalDays,
+        markerStatus: markerStatus || ({
+            own: "own",
+            other: "other",
+            remaining: "remaining",
+        }[detail.collectionCategory] || "own"),
+    }));
 }
 
 function EmptyRow({columns, children}) {
@@ -78,7 +136,7 @@ export default function EmployeeApiDashboard({
     const [anomalyResult, setAnomalyResult] = useState(null);
     const [anomalyLoading, setAnomalyLoading] = useState(false);
     const [anomalyError, setAnomalyError] = useState("");
-    const [attentionDialog, setAttentionDialog] = useState(null);
+    const [houseMapDialog, setHouseMapDialog] = useState(null);
 
     useEffect(() => {
         if (!beats.length) {
@@ -416,19 +474,28 @@ export default function EmployeeApiDashboard({
                 const group = employees.get(employeeKey) || {
                     employeeKey,
                     employeeName: record.scannerName || `Employee ${record.scannerId}`,
-                    houses: new Set(),
+                    houses: new Map(),
                 };
-                group.houses.add(detail.house.houseId);
+                group.houses.set(detail.house.houseId, detail);
                 employees.set(employeeKey, group);
             });
         });
         return [...employees.values()]
             .map((group) => ({
                 ...group,
-                houses: [...group.houses].sort((a, b) => a.localeCompare(b)),
+                houses: sortHouseDetails([...group.houses.values()], "other", "", group.employeeKey),
             }))
             .sort((a, b) => a.employeeName.localeCompare(b.employeeName));
     }, [houseCoverage]);
+    const otherEmployeeHouseDetails = useMemo(
+        () => sortHouseDetails(
+            [...new Map(otherEmployeeGroups.flatMap((group) =>
+                group.houses.map((detail) => [detail.house.houseId, detail])
+            )).values()],
+            "other", beat?.assignedEmployee?.id,
+        ),
+        [beat?.assignedEmployee?.id, otherEmployeeGroups],
+    );
 
     const ownCount = houseCoverage.assignedEmployeeCollected;
     const otherCount = houseCoverage.otherEmployeeCollected;
@@ -447,6 +514,51 @@ export default function EmployeeApiDashboard({
     const regularRate = attentionCounts.withHistory
         ? attentionCounts.regular * 100 / attentionCounts.withHistory
         : null;
+    const openHouseMap = (title, description, houses, geofencePolygons = beat.fencePolygons) => {
+        setHouseMapDialog({title, description, houses, geofencePolygons});
+    };
+    const collectionHouseDetails = (coverage, category) => sortHouseDetails(
+        coverage.details.filter((detail) => category === "all" ||
+            (category === "own" && detail.collectionCategory === "own") ||
+            (category === "other" && detail.collectionCategory === "other") ||
+            (category === "remaining" && detail.collectionCategory === "remaining")),
+        category, beat.assignedEmployee.id,
+    );
+    const openCoverageMap = (coverage, category, label, periodLabel) => {
+        const details = collectionHouseDetails(coverage, category);
+        const statusLabel = category === "own"
+            ? "Collected by assigned employee"
+            : category === "other"
+                ? "Collected by another employee"
+                : category === "remaining"
+                    ? "Not collected in this period"
+                    : null;
+        openHouseMap(
+            `${label} (${formatNumber(details.length)})`,
+            `${periodLabel} Select a house to highlight it on the map and view its details.`,
+            toHouseMapRows(details, statusLabel, category === "all" ? "own" : category),
+        );
+    };
+    const outsideBeatMapRows = (item) => {
+        const outsideBeat = otherBeats.find((otherBeat) => otherBeat.id === item.beatId);
+        const houseIds = new Set(item.houseIds);
+        return (outsideBeat?.houses || [])
+            .filter((house) => houseIds.has(house.houseId))
+            .sort((a, b) =>
+                (a.history?.collectionDates?.[0] || a.houseId).localeCompare(
+                    b.history?.collectionDates?.[0] || b.houseId,
+                ) || a.houseId.localeCompare(b.houseId)
+            )
+            .map((house) => ({
+                house,
+                statusLabel: `Collected outside ${beat.beatName}`,
+                lastScannedDate: house.history?.lastCollectionAt?.slice(0, 10) ||
+                    house.scanningDate?.slice(0, 10) || null,
+                scannerName: null,
+                beatName: item.beatName,
+                markerStatus: "own",
+            }));
+    };
 
     if (!beatData) {
         return (
@@ -540,12 +652,19 @@ export default function EmployeeApiDashboard({
                         </div>
                     </div>
                     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
-                        <Card label="Total Houses in My Beat" value={formatNumber(totalHouses)} />
+                        <Card
+                            label="Total Houses in My Beat"
+                            value={formatNumber(totalHouses)}
+                            onClick={() => openCoverageMap(houseCoverage, "all", "All houses in My Beat", `All houses in ${beat.beatName}.`)}
+                        />
                         <Card label="Collected by Me" value={formatNumber(ownCount)} tone="text-green-700"
+                            onClick={() => openCoverageMap(houseCoverage, "own", "Collected by Me", `Houses collected by ${beat.assignedEmployee.name} in the selected ${reportWindowLabel}.`)}
                             detail={`${ownCoveragePercent == null ? "Unavailable" : `${formatNumber(ownCoveragePercent, 1)}%`} in the selected reporting window; scanner must match the assigned employee.`} />
                         <Card label="Collected by Other Employees" value={formatNumber(otherCount)} tone="text-amber-700"
+                            onClick={() => openCoverageMap(houseCoverage, "other", "Collected by Other Employees", `Houses collected by other employees in the selected ${reportWindowLabel}.`)}
                             detail="In the selected reporting window; these houses still belong to My Beat." />
                         <Card label="Not Collected" value={formatNumber(remainingCount)} tone="text-red-700"
+                            onClick={() => openCoverageMap(houseCoverage, "remaining", "Not Collected", `Houses without an identified employee scan in the selected ${reportWindowLabel}.`)}
                             detail="No identified employee scan in the selected reporting window." />
                         <Card label="Overall Beat Coverage" value={beatCoveragePercent == null ? "Unavailable" : `${formatNumber(beatCoveragePercent, 1)}%`}
                             detail="Houses collected by Me or Others in the selected reporting window ÷ total houses." />
@@ -564,10 +683,17 @@ export default function EmployeeApiDashboard({
                                 Counts each HouseId once using its ScanningDates entry for this date.
                             </p>
                             <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
-                                <Card label="Total Houses" value={formatNumber(totalHouses)} />
-                                <Card label="Collected by Me" value={formatNumber(selectedDateCoverage.assignedEmployeeCollected)} tone="text-green-700" />
-                                <Card label="Collected by Other Employees" value={formatNumber(selectedDateCoverage.otherEmployeeCollected)} tone="text-amber-700" />
-                                <Card label="Not Scanned on Selected Date" value={formatNumber(selectedDateCoverage.remainingWithoutHistory)} tone="text-red-700" />
+                                <Card
+                                    label="Total Houses"
+                                    value={formatNumber(totalHouses)}
+                                    onClick={() => openCoverageMap(selectedDateCoverage, "all", "All houses on selected date", `All houses in ${beat.beatName}; collection status is evaluated for ${formatDate(effectiveEndDate)}.`)}
+                                />
+                                <Card label="Collected by Me" value={formatNumber(selectedDateCoverage.assignedEmployeeCollected)} tone="text-green-700"
+                                    onClick={() => openCoverageMap(selectedDateCoverage, "own", "Collected by Me on selected date", `Houses collected by ${beat.assignedEmployee.name} on ${formatDate(effectiveEndDate)}.`)} />
+                                <Card label="Collected by Other Employees" value={formatNumber(selectedDateCoverage.otherEmployeeCollected)} tone="text-amber-700"
+                                    onClick={() => openCoverageMap(selectedDateCoverage, "other", "Collected by Other Employees on selected date", `Houses collected by other employees on ${formatDate(effectiveEndDate)}.`)} />
+                                <Card label="Not Scanned on Selected Date" value={formatNumber(selectedDateCoverage.remainingWithoutHistory)} tone="text-red-700"
+                                    onClick={() => openCoverageMap(selectedDateCoverage, "remaining", "Not Scanned on Selected Date", `Houses with no identified employee scan on ${formatDate(effectiveEndDate)}.`)} />
                                 <Card
                                     label="Selected Date Coverage"
                                     value={totalHouses
@@ -609,7 +735,11 @@ export default function EmployeeApiDashboard({
                     <div className="mt-4 grid gap-3 md:grid-cols-2">
                         <button
                             type="button"
-                            onClick={() => setAttentionDialog("never-scanned")}
+                            onClick={() => openHouseMap(
+                                `No scan recorded (${formatNumber(noScanHistoryHouses.length)})`,
+                                "These houses have no ScanningDates entry in the available BeatWiseReport history through the selected date. This does not claim that they were never cleaned.",
+                                toHouseMapRows(noScanHistoryHouses, "No scan recorded in available history", "remaining"),
+                            )}
                             className="group flex min-h-24 items-center justify-between gap-4 rounded-lg border border-slate-200 bg-slate-50 p-4 text-left transition hover:border-slate-300 hover:bg-slate-100 hover:shadow-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-500"
                         >
                             <span>
@@ -623,7 +753,11 @@ export default function EmployeeApiDashboard({
                         </button>
                         <button
                             type="button"
-                            onClick={() => setAttentionDialog("overdue-this-week")}
+                            onClick={() => openHouseMap(
+                                `Overdue by up to 7 days (${formatNumber(housesOverdueUpToWeek.length)})`,
+                                `These houses have passed 1.5 times their typical collection interval and are no more than 7 days beyond that due point, through ${formatDate(effectiveEndDate)}.`,
+                                toHouseMapRows(housesOverdueUpToWeek, "Overdue by up to 7 days", "attention"),
+                            )}
                             className="group flex min-h-24 items-center justify-between gap-4 rounded-lg border border-amber-200 bg-amber-50 p-4 text-left transition hover:border-amber-300 hover:bg-amber-100 hover:shadow-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-500"
                         >
                             <span>
@@ -636,76 +770,6 @@ export default function EmployeeApiDashboard({
                             </span>
                         </button>
                     </div>
-                    <Dialog
-                        open={attentionDialog !== null}
-                        onOpenChange={(open) => {
-                            if (!open) setAttentionDialog(null);
-                        }}
-                    >
-                        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-4xl">
-                            <DialogHeader>
-                                <DialogTitle>
-                                    {attentionDialog === "never-scanned"
-                                        ? `No scan recorded (${formatNumber(noScanHistoryHouses.length)})`
-                                        : `Overdue by up to 7 days (${formatNumber(housesOverdueUpToWeek.length)})`}
-                                </DialogTitle>
-                                <DialogDescription>
-                                    {attentionDialog === "never-scanned"
-                                        ? "These houses have no ScanningDates entry in the available BeatWiseReport history through the selected date. This does not claim that they were never cleaned."
-                                        : `These houses have passed 1.5 times their typical collection interval and are no more than 7 days beyond that due point, through ${formatDate(effectiveEndDate)}.`}
-                                </DialogDescription>
-                            </DialogHeader>
-                            <div className="max-h-[60vh] overflow-auto rounded border border-slate-200">
-                                <table className="w-full min-w-[680px] text-left text-sm">
-                                    <thead className="sticky top-0 bg-slate-50 text-xs font-semibold text-slate-600">
-                                        <tr>
-                                            <th className="p-3">House ID</th>
-                                            <th className="p-3">Last scanned date</th>
-                                            <th className="p-3">Days since last scan</th>
-                                            <th className="p-3">Days overdue</th>
-                                            <th className="p-3">Normal interval</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {(attentionDialog === "never-scanned"
-                                            ? noScanHistoryHouses
-                                            : housesOverdueUpToWeek
-                                        ).map((detail) => (
-                                            <tr key={detail.house.houseId} className="border-t border-slate-100">
-                                                <td className="p-3 font-medium text-slate-900">{detail.house.houseId}</td>
-                                                <td className="p-3">
-                                                    {detail.lastRecordedDate
-                                                        ? formatDate(detail.lastRecordedDate)
-                                                        : "No scan recorded"}
-                                                </td>
-                                                <td className="p-3">
-                                                    {detail.currentGapDays == null
-                                                        ? "—"
-                                                        : formatDays(detail.currentGapDays)}
-                                                </td>
-                                                <td className="p-3">
-                                                    {detail.status !== "Overdue" ||
-                                                        detail.currentGapDays == null ||
-                                                        detail.typicalIntervalDays == null
-                                                        ? "—"
-                                                        : formatDays(detail.currentGapDays - detail.typicalIntervalDays * 1.5)}
-                                                </td>
-                                                <td className="p-3">
-                                                    {detail.typicalIntervalDays == null
-                                                        ? "Not enough scan history"
-                                                        : formatDays(detail.typicalIntervalDays)}
-                                                </td>
-                                            </tr>
-                                        ))}
-                                        {((attentionDialog === "never-scanned" && !noScanHistoryHouses.length) ||
-                                            (attentionDialog === "overdue-this-week" && !housesOverdueUpToWeek.length)) && (
-                                            <EmptyRow columns={5}>No houses in this group.</EmptyRow>
-                                        )}
-                                    </tbody>
-                                </table>
-                            </div>
-                        </DialogContent>
-                    </Dialog>
                 </section>
 
                 <section className="rounded-xl bg-white p-4 shadow-sm">
@@ -715,24 +779,32 @@ export default function EmployeeApiDashboard({
                             These houses belong to My Beat. Select an employee to see the houses they collected.
                         </p>
                     </div>
-                    <p className="mt-3 text-sm font-semibold text-slate-800">
+                    <button
+                        type="button"
+                        onClick={() => openHouseMap(
+                            `Collected by other employees (${formatNumber(otherEmployeeHouseDetails.length)})`,
+                            "Houses from My Beat collected by other employees in the selected reporting period.",
+                            toHouseMapRows(otherEmployeeHouseDetails, "Collected by another employee", "other"),
+                        )}
+                        className="mt-3 rounded border border-slate-200 bg-white px-3 py-2 text-left text-sm font-semibold text-slate-800 transition hover:border-green-300 hover:bg-green-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-green-600"
+                    >
                         Total: {formatNumber(houseCoverage.otherEmployeeCollected)} distinct houses · {formatNumber(otherEmployeeGroups.length)} other employees
-                    </p>
+                    </button>
                     <div className="mt-2 max-h-[24rem] overflow-auto rounded border border-slate-200">
                         {otherEmployeeGroups.length ? otherEmployeeGroups.map((group) => (
-                            <details key={group.employeeKey} className="border-b border-slate-100 last:border-b-0">
-                                <summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-3 text-sm hover:bg-slate-50">
-                                    <span className="font-medium text-slate-800">{group.employeeName}</span>
-                                    <span className="text-slate-600">{formatNumber(group.houses.length)} houses</span>
-                                </summary>
-                                <ul className="grid gap-1 bg-slate-50 px-3 pb-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
-                                    {group.houses.map((houseId) => (
-                                        <li key={houseId} className="rounded border border-slate-200 bg-white px-2 py-1">
-                                            {houseId}
-                                        </li>
-                                    ))}
-                                </ul>
-                            </details>
+                            <button
+                                type="button"
+                                key={group.employeeKey}
+                                onClick={() => openHouseMap(
+                                    `${group.employeeName} (${formatNumber(group.houses.length)} houses)`,
+                                    `My Beat houses collected by ${group.employeeName} in the selected reporting period.`,
+                                    toHouseMapRows(group.houses, `Collected by ${group.employeeName}`, "other"),
+                                )}
+                                className="flex w-full items-center justify-between gap-3 border-b border-slate-100 p-3 text-left text-sm transition last:border-b-0 hover:bg-green-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-inset focus-visible:outline-green-600"
+                            >
+                                <span className="font-medium text-slate-800">{group.employeeName}</span>
+                                <span className="text-slate-600">{formatNumber(group.houses.length)} houses · View map</span>
+                            </button>
                         )) : (
                             <p className="p-6 text-center text-sm text-slate-500">
                                 No My Beat houses have an identified scan by another employee in this period.
@@ -748,11 +820,23 @@ export default function EmployeeApiDashboard({
                             Counts distinct houses in other uploaded Beats scanned by this employee&apos;s ScannerUserId. This does not affect My Beat coverage.
                         </p>
                     </div>
-                    <p className="mt-3 text-sm font-semibold text-slate-800">
+                    <button
+                        type="button"
+                        disabled={!beats.length || !outsideBeatAnalysis.totalHouses}
+                        onClick={() => openHouseMap(
+                            `Collected outside My Beat (${formatNumber(outsideBeatAnalysis.totalHouses)})`,
+                            `Houses collected by ${beat.assignedEmployee.name} in other uploaded Beats during the selected reporting period.`,
+                            outsideBeatAnalysis.byBeat.flatMap((item) => outsideBeatMapRows(item)),
+                            outsideBeatAnalysis.byBeat.flatMap((item) =>
+                                otherBeats.find((otherBeat) => otherBeat.id === item.beatId)?.fencePolygons || []
+                            ),
+                        )}
+                        className="mt-3 rounded border border-slate-200 bg-white px-3 py-2 text-left text-sm font-semibold text-slate-800 transition hover:border-green-300 hover:bg-green-50 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
                         Total outside-Beat houses: {beats.length > 1
                             ? formatNumber(outsideBeatAnalysis.totalHouses)
-                            : "Unavailable"}
-                    </p>
+                            : "Unavailable"} · View map
+                    </button>
                     <div className="mt-2 max-h-56 overflow-auto rounded border border-slate-200">
                         <table className="w-full min-w-[650px] text-left text-sm">
                             <thead className="sticky top-0 bg-slate-50 text-xs font-semibold text-slate-600">
@@ -762,10 +846,36 @@ export default function EmployeeApiDashboard({
                                 {outsideBeatAnalysis.byBeat.map((item) => (
                                     <tr key={item.beatId} className="border-t border-slate-100">
                                         <td className="p-3">{item.beatName}</td>
-                                        <td className="p-3">{formatNumber(item.count)}</td>
-                                        <td className="p-3">{item.houseIds.slice(0, 12).join(", ")}{item.houseIds.length > 12
-                                            ? ` and ${formatNumber(item.houseIds.length - 12)} more`
-                                            : ""}</td>
+                                        <td className="p-3">
+                                            <button
+                                                type="button"
+                                                onClick={() => openHouseMap(
+                                                    `${item.beatName} (${formatNumber(item.count)} houses)`,
+                                                    `Houses collected by ${beat.assignedEmployee.name} in ${item.beatName}.`,
+                                                    outsideBeatMapRows(item),
+                                                    otherBeats.find((otherBeat) => otherBeat.id === item.beatId)?.fencePolygons || [],
+                                                )}
+                                                className="font-semibold text-green-800 underline decoration-green-300 underline-offset-2 hover:text-green-950"
+                                            >
+                                                {formatNumber(item.count)} · View map
+                                            </button>
+                                        </td>
+                                        <td className="p-3">
+                                            <button
+                                                type="button"
+                                                onClick={() => openHouseMap(
+                                                    `${item.beatName} (${formatNumber(item.count)} houses)`,
+                                                    `Houses collected by ${beat.assignedEmployee.name} in ${item.beatName}.`,
+                                                    outsideBeatMapRows(item),
+                                                    otherBeats.find((otherBeat) => otherBeat.id === item.beatId)?.fencePolygons || [],
+                                                )}
+                                                className="text-left text-green-800 underline decoration-green-300 underline-offset-2 hover:text-green-950"
+                                            >
+                                                {item.houseIds.slice(0, 12).join(", ")}{item.houseIds.length > 12
+                                                    ? ` and ${formatNumber(item.houseIds.length - 12)} more`
+                                                    : ""}
+                                            </button>
+                                        </td>
                                     </tr>
                                 ))}
                                 {!outsideBeatAnalysis.byBeat.length && (
@@ -998,6 +1108,16 @@ export default function EmployeeApiDashboard({
                         </>
                     )}
                 </section>
+                <AnalysisHouseMapDialog
+                    open={Boolean(houseMapDialog)}
+                    onOpenChange={(open) => {
+                        if (!open) setHouseMapDialog(null);
+                    }}
+                    title={houseMapDialog?.title || ""}
+                    description={houseMapDialog?.description || ""}
+                    houses={houseMapDialog?.houses || []}
+                    geofencePolygons={houseMapDialog?.geofencePolygons || beat.fencePolygons || []}
+                />
             </div>
         </div>
     );
