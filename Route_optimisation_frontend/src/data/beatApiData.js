@@ -50,6 +50,16 @@ function coordinateKey(point) {
     return `${point.lat.toFixed(7)},${point.lon.toFixed(7)}`;
 }
 
+export function beatHasHouseRecords(beat) {
+    const hasReportedCounts = beat.totalScannedHouses != null ||
+        beat.totalNotScannedHouses != null;
+    if (hasReportedCounts) {
+        return Number(beat.totalScannedHouses || 0) > 0 ||
+            Number(beat.totalNotScannedHouses || 0) > 0;
+    }
+    return (beat.houses || []).length > 0;
+}
+
 function parseGeofence(value, label) {
     if (Array.isArray(value)) {
         const polygon = value.map((point, index) => {
@@ -180,8 +190,6 @@ function normalizeBeat(report, routeDetails, index) {
         ...(scannedRows || []).map((record) => ({record, listedAsScanned: true})),
         ...(unscannedRows || []).map((record) => ({record, listedAsScanned: false})),
     ];
-    if (!sourceRows.length) throw new Error(`Beat ${beatId} has no scanned or unscanned houses.`);
-
     const houseIds = new Set();
     const houses = sourceRows.map(({record, listedAsScanned}, rowIndex) => {
         if (!record || typeof record !== "object" || Array.isArray(record)) {

@@ -11,6 +11,8 @@ import {
 } from "../data/employeePerformance.js";
 import {API_URL} from "../config.js";
 import AnalysisHouseMapDialog from "./AnalysisHouseMapDialog.jsx";
+import StateUlbFilters from "./StateUlbFilters.jsx";
+import {beatHasHouseRecords} from "../data/beatApiData.js";
 
 function formatNumber(value, digits = 0) {
     return Number(value || 0).toLocaleString(undefined, {maximumFractionDigits: digits});
@@ -124,29 +126,111 @@ function EmptyRow({columns, children}) {
     return <tr><td colSpan={columns} className="p-6 text-center text-slate-500">{children}</td></tr>;
 }
 
+function EmployeeAnalysisFilters({
+    ulbs,
+    selectedUlbId,
+    onSelectedUlbIdChange,
+    employeeOptions,
+    selectedEmployeeId,
+    onSelectedEmployeeIdChange,
+    dateSelection,
+    dateOptions,
+    onDateSelectionChange,
+}) {
+    return (
+        <div className="flex flex-wrap items-end gap-3">
+            <StateUlbFilters
+                ulbs={ulbs}
+                selectedUlbId={selectedUlbId}
+                onSelectedUlbIdChange={onSelectedUlbIdChange}
+            />
+            <label className="grid gap-1 text-sm font-medium text-slate-700">
+                Employee
+                <select
+                    value={selectedEmployeeId}
+                    onChange={(event) => onSelectedEmployeeIdChange(event.target.value)}
+                    disabled={!employeeOptions.length}
+                    className="min-w-52 rounded border border-slate-300 bg-white p-2 disabled:bg-slate-100"
+                >
+                    <option value="">{employeeOptions.length ? "Select an employee" : "Upload employee list"}</option>
+                    {employeeOptions.map((employee) => (
+                        <option key={employee.id} value={employee.id}>
+                            {employee.name}{employee.isInactive ? " (Inactive)" : ""} · {employee.id}
+                        </option>
+                    ))}
+                </select>
+            </label>
+            <label className="grid gap-1 text-sm font-medium text-slate-700">
+                Analyze through
+                <select
+                    value={dateSelection}
+                    onChange={(event) => onDateSelectionChange?.(event.target.value)}
+                    disabled={!dateOptions.length}
+                    className="rounded border border-slate-300 bg-white p-2 disabled:bg-slate-100"
+                >
+                    <option value="live">
+                        Live date{dateOptions.at(-1) ? ` (${dateOptions.at(-1)})` : ""}
+                    </option>
+                    {dateOptions.map((date) => (
+                        <option key={date} value={date}>{formatDate(date)}</option>
+                    ))}
+                </select>
+            </label>
+        </div>
+    );
+}
+
 export default function EmployeeApiDashboard({
     beatData,
+    employeeList,
+    ulbs,
+    selectedUlbId,
+    onSelectedUlbIdChange,
     onShowHighPriorityHouses,
     dateSelection = "live",
     availableDates = [],
     onDateSelectionChange,
 }) {
     const beats = beatData?.beats || [];
-    const [selectedBeatId, setSelectedBeatId] = useState("");
+    const [selectedEmployeeId, setSelectedEmployeeId] = useState("");
     const [anomalyResult, setAnomalyResult] = useState(null);
     const [anomalyLoading, setAnomalyLoading] = useState(false);
     const [anomalyError, setAnomalyError] = useState("");
     const [houseMapDialog, setHouseMapDialog] = useState(null);
 
+    const employeeOptions = useMemo(() => {
+        const source = employeeList?.employees || beats.map((item) => ({
+            id: String(item.assignedEmployee.id),
+            name: item.assignedEmployee.name,
+        }));
+        const hasHouseRecordsByEmployee = new Map();
+        beats.forEach((item) => {
+            const id = String(item.assignedEmployee?.id || item.beatUserId || "");
+            if (!id) return;
+            hasHouseRecordsByEmployee.set(
+                id,
+                (hasHouseRecordsByEmployee.get(id) || false) || beatHasHouseRecords(item),
+            );
+        });
+        const uniqueEmployees = [...new Map(source.map((employee) => [String(employee.id), {
+            id: String(employee.id),
+            name: employee.name,
+        }])).values()].sort((a, b) => a.name.localeCompare(b.name));
+        return uniqueEmployees.map((employee) => ({
+            ...employee,
+            isInactive: hasHouseRecordsByEmployee.has(employee.id) &&
+                !hasHouseRecordsByEmployee.get(employee.id),
+        }));
+    }, [beats, employeeList]);
     useEffect(() => {
-        if (!beats.length) {
-            setSelectedBeatId("");
-            return;
+        if (selectedEmployeeId && !employeeOptions.some((employee) => employee.id === selectedEmployeeId)) {
+            setSelectedEmployeeId("");
         }
-        if (!beats.some((item) => item.id === selectedBeatId)) setSelectedBeatId(beats[0].id);
-    }, [beats, selectedBeatId]);
+    }, [employeeOptions, selectedEmployeeId]);
 
-    const beat = beats.find((item) => item.id === selectedBeatId) || beats[0] || null;
+    const beat = beats.find((item) =>
+        String(item.assignedEmployee.id) === selectedEmployeeId
+    ) || null;
     const analysisDateOptions = useMemo(() => {
         if (!beat) return [];
         const dates = new Set();
@@ -560,17 +644,68 @@ export default function EmployeeApiDashboard({
             }));
     };
 
-    if (!beatData) {
+    if (!selectedEmployeeId) {
+        const hasEmployeeList = Boolean(employeeList);
         return (
             <div className="h-full overflow-y-auto bg-slate-50 p-4">
-                <p role="status" className="mx-auto max-w-7xl rounded border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
-                    Upload the Beat API file above to view employee house collection analysis.
-                </p>
+                <section className="mx-auto flex max-w-7xl flex-col gap-4 rounded-xl bg-white p-5 shadow-sm">
+                    <div>
+                        <h1 className="text-2xl font-bold text-slate-900">Employee Analysis</h1>
+                        <p className="mt-1 text-sm text-slate-600">Choose a ULB and employee to view that employee&apos;s analysis.</p>
+                    </div>
+                    <EmployeeAnalysisFilters
+                        ulbs={ulbs}
+                        selectedUlbId={selectedUlbId}
+                        onSelectedUlbIdChange={onSelectedUlbIdChange}
+                        employeeOptions={employeeOptions}
+                        selectedEmployeeId={selectedEmployeeId}
+                        onSelectedEmployeeIdChange={setSelectedEmployeeId}
+                        dateSelection={dateSelection}
+                        dateOptions={dateOptions}
+                        onDateSelectionChange={onDateSelectionChange}
+                    />
+                    <p role="status" className="rounded border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
+                        {!selectedUlbId
+                            ? "Upload the ULB list, then select a ULB."
+                            : !hasEmployeeList && !beats.length
+                                ? "Upload the employee list and Beat/API files for this ULB."
+                                : !employeeOptions.length
+                                    ? "No employees are available for this ULB."
+                                    : !selectedEmployeeId
+                                        ? "Select an employee to view their analysis."
+                                        : "No Beat/API data is loaded for this ULB."}
+                    </p>
+                </section>
             </div>
         );
     }
 
-    if (!beat) return <div className="p-4 text-sm text-slate-600">No Beat records were found in this API file.</div>;
+    if (!beat) {
+        return (
+            <div className="h-full overflow-y-auto bg-slate-50 p-4">
+                <section className="mx-auto flex max-w-7xl flex-col gap-4 rounded-xl bg-white p-5 shadow-sm">
+                    <div>
+                        <h1 className="text-2xl font-bold text-slate-900">Employee Analysis</h1>
+                        <p className="mt-1 text-sm text-slate-600">Choose an employee with uploaded Beat/API data.</p>
+                    </div>
+                    <EmployeeAnalysisFilters
+                        ulbs={ulbs}
+                        selectedUlbId={selectedUlbId}
+                        onSelectedUlbIdChange={onSelectedUlbIdChange}
+                        employeeOptions={employeeOptions}
+                        selectedEmployeeId={selectedEmployeeId}
+                        onSelectedEmployeeIdChange={setSelectedEmployeeId}
+                        dateSelection={dateSelection}
+                        dateOptions={dateOptions}
+                        onDateSelectionChange={onDateSelectionChange}
+                    />
+                    <p role="status" className="rounded border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
+                        No Beat/API data is loaded for the selected employee in this ULB.
+                    </p>
+                </section>
+            </div>
+        );
+    }
 
     return (
         <div className="h-full overflow-y-auto bg-slate-50 p-4">
@@ -583,40 +718,17 @@ export default function EmployeeApiDashboard({
                                 House coverage and collection regularity for {beat.assignedEmployee.name}.
                             </p>
                         </div>
-                        <div className="flex flex-wrap gap-3">
-                            {beats.length > 1 && (
-                                <label className="grid gap-1 text-sm font-medium text-slate-700">
-                                    Assigned Beat
-                                    <select
-                                        value={beat.id}
-                                        onChange={(event) => setSelectedBeatId(event.target.value)}
-                                        className="rounded border border-slate-300 bg-white p-2"
-                                    >
-                                        {beats.map((item) => (
-                                            <option key={item.id} value={item.id}>
-                                                {item.beatName} · {item.assignedEmployee.name}
-                                            </option>
-                                        ))}
-                                    </select>
-                                </label>
-                            )}
-                            <label className="grid gap-1 text-sm font-medium text-slate-700">
-                                Analyze through
-                                <select
-                                    value={dateSelection}
-                                    onChange={(event) => onDateSelectionChange?.(event.target.value)}
-                                    disabled={!dateOptions.length}
-                                    className="rounded border border-slate-300 bg-white p-2 disabled:bg-slate-100"
-                                >
-                                    <option value="live">
-                                        Live date{analysisDateOptions.at(-1) ? ` (${analysisDateOptions.at(-1)})` : ""}
-                                    </option>
-                                    {dateOptions.map((date) => (
-                                        <option key={date} value={date}>{formatDate(date)}</option>
-                                    ))}
-                                </select>
-                            </label>
-                        </div>
+                        <EmployeeAnalysisFilters
+                            ulbs={ulbs}
+                            selectedUlbId={selectedUlbId}
+                            onSelectedUlbIdChange={onSelectedUlbIdChange}
+                            employeeOptions={employeeOptions}
+                            selectedEmployeeId={selectedEmployeeId}
+                            onSelectedEmployeeIdChange={setSelectedEmployeeId}
+                            dateSelection={dateSelection}
+                            dateOptions={dateOptions}
+                            onDateSelectionChange={onDateSelectionChange}
+                        />
                     </div>
                     <p className="mt-3 text-xs text-slate-500">
                         {beat.beatName} · {formatDate(effectiveStartDate)} to {formatDate(effectiveEndDate)} · {reportWindowLabel}

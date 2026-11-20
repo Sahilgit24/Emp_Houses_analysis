@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {combineNormalizedBeatData, normalizeBeatApiPayload} from "../src/data/beatApiData.js";
+import {
+    beatHasHouseRecords,
+    combineNormalizedBeatData,
+    normalizeBeatApiPayload,
+} from "../src/data/beatApiData.js";
 
 const sample = {
     BeatWiseReport: {
@@ -157,6 +161,26 @@ test("reads ScanningDates once per house and carries the row scanner to each dat
         ["7", "7", "7"],
     );
     assert.equal(house.history.collectionCount, 3);
+});
+
+test("accepts empty Beat house arrays and retains the assigned employee as inactive", () => {
+    const emptyBeat = structuredClone(sample);
+    emptyBeat.BeatWiseReport.BeatUserName = "Assigned worker";
+    emptyBeat.BeatWiseReport.TotalHouses = 0;
+    emptyBeat.BeatWiseReport.TotalScannedHouses = 0;
+    emptyBeat.BeatWiseReport.TotalNotScannedHouses = 0;
+    emptyBeat.BeatWiseReport.ScannedHouses = [];
+    emptyBeat.BeatWiseReport.NotScannedHouses = [];
+
+    const [beat] = normalizeBeatApiPayload(emptyBeat, "Akash Gedam.txt").beats;
+
+    assert.deepEqual(beat.houses, []);
+    assert.equal(beat.totalHouses, 0);
+    assert.equal(beat.totalScannedHouses, 0);
+    assert.equal(beat.totalNotScannedHouses, 0);
+    assert.deepEqual(beat.assignedEmployee, {id: "7", name: "Assigned worker"});
+    assert.equal(beatHasHouseRecords(beat), false);
+    assert.equal(beatHasHouseRecords(normalizeBeatApiPayload(sample).beats[0]), true);
 });
 
 test("keeps ScanningDate history even when the snapshot Scanned flag is false", () => {
