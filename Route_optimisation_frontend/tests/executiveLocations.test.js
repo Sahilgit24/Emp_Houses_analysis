@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {normalizeEmployeeList, normalizeUlbList} from "../src/data/executiveLocations.js";
 
-test("normalizes the uploaded ULB list using appid as the stable ID", () => {
+test("normalizes the ULB list using appid as the stable ID", () => {
     assert.deepEqual(normalizeUlbList([
         {ulb: "Amalner Nagar Parishad", appid: 3339, faq: "0"},
         {ulb: "Aarmori Nagar Parishad", appid: 3076, faq: "0"},
@@ -28,13 +28,27 @@ test("normalizes employee choices from the AllBeats employee list", () => {
             {UserId: "8", UserName: "Other worker", IsUserActive: false, IsBeatActive: true},
         ],
     }), [
-        {id: "7", name: "Assigned worker"},
-        {id: "8", name: "Other worker"},
+        {id: "7", name: "Assigned worker", isInactive: false},
+        {id: "8", name: "Other worker", isInactive: true},
     ]);
 });
 
-test("rejects employee lists that lack the expected AllBeats identity fields", () => {
-    assert.throws(() => normalizeEmployeeList({AllUsers: []}), /AllBeats array/);
+test("normalizes all employee choices returned by the AllUsers API", () => {
+    assert.deepEqual(normalizeEmployeeList({
+        AllUsers: [
+            {UserId: 7, UserName: "Assigned worker"},
+            {UserId: "8", UserName: "Other worker"},
+            {UserId: 7, UserName: "Assigned worker"},
+        ],
+        InactiveUsers: [{UserId: 8, UserName: "Other worker"}],
+    }), [
+        {id: "7", name: "Assigned worker"},
+        {id: "8", name: "Other worker", isInactive: true},
+    ]);
+});
+
+test("rejects employee lists that lack the expected identity fields", () => {
+    assert.throws(() => normalizeEmployeeList({}), /AllUsers or AllBeats array/);
     assert.throws(() => normalizeEmployeeList({
         AllBeats: [{UserId: 7}],
     }), /UserId and UserName/);

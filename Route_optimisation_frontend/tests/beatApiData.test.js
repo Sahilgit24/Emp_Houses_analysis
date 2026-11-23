@@ -183,6 +183,26 @@ test("accepts empty Beat house arrays and retains the assigned employee as inact
     assert.equal(beatHasHouseRecords(normalizeBeatApiPayload(sample).beats[0]), true);
 });
 
+test("accepts a house-free employee report without a geofence and retains its GPS routes", () => {
+    const emptyBeat = structuredClone(sample);
+    emptyBeat.BeatWiseReport.TotalHouses = 0;
+    emptyBeat.BeatWiseReport.TotalScannedHouses = 0;
+    emptyBeat.BeatWiseReport.TotalNotScannedHouses = 0;
+    emptyBeat.BeatWiseReport.ScannedHouses = [];
+    emptyBeat.BeatWiseReport.NotScannedHouses = [];
+    delete emptyBeat.BeatWiseReport.geofence;
+    delete emptyBeat.RouteDetails.geofence;
+
+    const [beat] = normalizeBeatApiPayload(emptyBeat).beats;
+
+    assert.deepEqual(beat.houses, []);
+    assert.deepEqual(beat.fencePolygons, []);
+    assert.deepEqual(beat.fencePoints, []);
+    assert.equal(beat.routes.length, 2);
+    assert.ok(beat.routes[1].trackPoints.length > 0);
+    assert.equal(beatHasHouseRecords(beat), false);
+});
+
 test("keeps ScanningDate history even when the snapshot Scanned flag is false", () => {
     const withScanningDate = structuredClone(sample);
     const house = withScanningDate.BeatWiseReport.NotScannedHouses[0];

@@ -8,9 +8,35 @@ import {
     getHighPriorityAttentionHouses,
     getNextCollectionPriorities,
     getCoverageTrend,
+    isEmployeeActiveOnDate,
     summarizeCollectionPatterns,
     summarizeDailyEmployeeReport,
 } from "../src/data/employeePerformance.js";
+
+test("employee activity dots require house data and GPS points on the selected date", () => {
+    const beats = [
+        {
+            assignedEmployee: {id: "active"},
+            houses: [{houseId: "H1"}],
+            routes: [{date: "2026-11-23", trackPoints: [{lat: 21, lon: 75}]}],
+        },
+        {
+            assignedEmployee: {id: "no-house"},
+            houses: [],
+            routes: [{date: "2026-11-23", trackPoints: [{lat: 21, lon: 75}]}],
+        },
+        {
+            assignedEmployee: {id: "other-date"},
+            houses: [{houseId: "H2"}],
+            routes: [{date: "2026-11-22", trackPoints: [{lat: 21, lon: 75}]}],
+        },
+    ];
+
+    assert.equal(isEmployeeActiveOnDate(beats, "active", "2026-11-23"), true);
+    assert.equal(isEmployeeActiveOnDate(beats, "no-house", "2026-11-23"), false);
+    assert.equal(isEmployeeActiveOnDate(beats, "other-date", "2026-11-23"), false);
+    assert.equal(isEmployeeActiveOnDate(beats, "active", null), false);
+});
 
 test("uses the selected reporting window for house collection history", () => {
     const houses = [{

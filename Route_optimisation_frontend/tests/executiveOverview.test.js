@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+    averageExecutiveOverview,
+    getExecutiveEmployees,
     getExecutiveMonitoringDates,
+    getTodayInTimeZone,
     summarizeExecutiveOverview,
 } from "../src/data/executiveOverview.js";
 
@@ -50,6 +53,17 @@ const employeeListsByUlb = {
     ]},
 };
 
+test("formats the live monitoring date in the selected timezone", () => {
+    assert.equal(
+        getTodayInTimeZone("Asia/Kolkata", new Date("2026-11-23T18:45:00.000Z")),
+        "2026-11-24",
+    );
+    assert.equal(
+        getTodayInTimeZone("Asia/Kolkata", new Date("2026-11-23T05:30:00.000Z")),
+        "2026-11-23",
+    );
+});
+
 test("summarizes selected ULB activity and the four collection categories through the selected date", () => {
     const summary = summarizeExecutiveOverview(
         sources,
@@ -62,6 +76,8 @@ test("summarizes selected ULB activity and the four collection categories throug
     assert.equal(summary.totalEmployees, 3);
     assert.equal(summary.activeEmployees, 1);
     assert.equal(summary.inactiveEmployees, 2);
+    assert.deepEqual(summary.activeEmployeeList.map(({id}) => id), ["1"]);
+    assert.deepEqual(summary.inactiveEmployeeList.map(({id}) => id), ["2", "3"]);
     assert.equal(summary.totalHouses, 4);
     assert.equal(summary.collectedHouses, 3);
     assert.equal(summary.coveragePercent, 75);
@@ -90,4 +106,71 @@ test("all-ULB summary combines sources while dates before scanning show uncollec
     assert.equal(allUlbs.collectedHouses, 0);
     assert.equal(allUlbs.collectionPattern.find(({key}) => key === "never").count, 5);
     assert.deepEqual(getExecutiveMonitoringDates(sources), ["2026-03-10"]);
+});
+
+test("employee selection limits activity and house metrics to that employee's assigned Beat", () => {
+    const employees = getExecutiveEmployees(sources, employeeListsByUlb, "ulb-a", ulbs);
+    assert.deepEqual(employees.map(({id}) => id), ["1", "2", "3"]);
+
+    const employeeSummary = summarizeExecutiveOverview(
+        sources,
+        ulbs,
+        employeeListsByUlb,
+        "ulb-a",
+        "2026-03-10",
+        {id: "1", ulbId: "ulb-a", name: "Employee 1"},
+    );
+
+    assert.equal(employeeSummary.employeeName, "Employee 1");
+    assert.equal(employeeSummary.totalEmployees, 1);
+    assert.equal(employeeSummary.activeEmployees, 1);
+    assert.equal(employeeSummary.totalHouses, 4);
+    assert.equal(employeeSummary.collectedHouses, 3);
+});
+
+test("average summary averages all displayed metrics across every calendar day in range", () => {
+    const average = averageExecutiveOverview(
+        sources,
+        ulbs,
+        employeeListsByUlb,
+        "ulb-a",
+        "2026-03-09",
+        "2026-03-10",
+    );
+
+    assert.equal(average.averageDays, 2);
+    assert.equal(average.activeEmployees, 0.5);
+    assert.equal(average.inactiveEmployees, 2.5);
+    assert.equal(average.totalHouses, 4);
+    assert.equal(average.collectedHouses, 1.5);
+    assert.equal(average.coveragePercent, 37.5);
+    assert.deepEqual(average.activeEmployeeList.map(({id}) => id), ["1"]);
+    assert.deepEqual(average.inactiveEmployeeList.map(({id}) => id), ["2", "3"]);
+    assert.deepEqual(average.collectionPattern.map(({key, count, percent}) => ({
+        key,
+        count,
+        percent,
+    })), [
+        {key: "inside", count: 0.5, percent: 12.5},
+        {key: "outside", count: 0.5, percent: 12.5},
+        {key: "other", count: 0.5, percent: 12.5},
+        {key: "never", count: 2.5, percent: 62.5},
+    ]);
+
+    assert.throws(() => averageExecutiveOverview(
+        sources,
+        ulbs,
+        employeeListsByUlb,
+        "ulb-a",
+        "2026-03-10",
+        "2026-03-09",
+    ), /valid date range/);
+    assert.throws(() => averageExecutiveOverview(
+        sources,
+        ulbs,
+        employeeListsByUlb,
+        "ulb-a",
+        "2026-02-31",
+        "2026-03-10",
+    ), /valid date range/);
 });

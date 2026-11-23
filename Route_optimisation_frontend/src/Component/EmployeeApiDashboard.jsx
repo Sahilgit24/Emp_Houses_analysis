@@ -6,13 +6,14 @@ import {
     getHighPriorityAttentionHouses,
     getNextCollectionPriorities,
     getCoverageTrend,
+    isEmployeeActiveOnDate,
     summarizeCollectionPatterns,
     summarizeDailyEmployeeReport,
 } from "../data/employeePerformance.js";
 import {API_URL} from "../config.js";
 import AnalysisHouseMapDialog from "./AnalysisHouseMapDialog.jsx";
-import StateUlbFilters from "./StateUlbFilters.jsx";
-import {beatHasHouseRecords} from "../data/beatApiData.js";
+
+const ALL_EMPLOYEES = "all";
 
 function formatNumber(value, digits = 0) {
     return Number(value || 0).toLocaleString(undefined, {maximumFractionDigits: digits});
@@ -127,54 +128,36 @@ function EmptyRow({columns, children}) {
 }
 
 function EmployeeAnalysisFilters({
-    ulbs,
-    selectedUlbId,
-    onSelectedUlbIdChange,
     employeeOptions,
     selectedEmployeeId,
     onSelectedEmployeeIdChange,
-    dateSelection,
-    dateOptions,
-    onDateSelectionChange,
+    isLoading,
 }) {
     return (
         <div className="flex flex-wrap items-end gap-3">
-            <StateUlbFilters
-                ulbs={ulbs}
-                selectedUlbId={selectedUlbId}
-                onSelectedUlbIdChange={onSelectedUlbIdChange}
-            />
             <label className="grid gap-1 text-sm font-medium text-slate-700">
                 Employee
                 <select
                     value={selectedEmployeeId}
                     onChange={(event) => onSelectedEmployeeIdChange(event.target.value)}
-                    disabled={!employeeOptions.length}
                     className="min-w-52 rounded border border-slate-300 bg-white p-2 disabled:bg-slate-100"
                 >
-                    <option value="">{employeeOptions.length ? "Select an employee" : "Upload employee list"}</option>
+                    <option value={ALL_EMPLOYEES}>
+                        All employees{employeeOptions.length ? ` (${employeeOptions.length})` : ""}
+                    </option>
                     {employeeOptions.map((employee) => (
-                        <option key={employee.id} value={employee.id}>
-                            {employee.name}{employee.isInactive ? " (Inactive)" : ""} · {employee.id}
+                        <option
+                            key={employee.id}
+                            value={employee.id}
+                            style={{color: employee.isActiveToday ? "#15803d" : employee.isReportLoaded ? "#475569" : "#b45309"}}
+                        >
+                            {employee.isActiveToday ? "●" : employee.isReportLoaded ? "○" : "◌"} {employee.name} · {employee.id} · {employee.activityStatus}{employee.isInactive ? " · Account inactive" : ""}
                         </option>
                     ))}
                 </select>
-            </label>
-            <label className="grid gap-1 text-sm font-medium text-slate-700">
-                Analyze through
-                <select
-                    value={dateSelection}
-                    onChange={(event) => onDateSelectionChange?.(event.target.value)}
-                    disabled={!dateOptions.length}
-                    className="rounded border border-slate-300 bg-white p-2 disabled:bg-slate-100"
-                >
-                    <option value="live">
-                        Live date{dateOptions.at(-1) ? ` (${dateOptions.at(-1)})` : ""}
-                    </option>
-                    {dateOptions.map((date) => (
-                        <option key={date} value={date}>{formatDate(date)}</option>
-                    ))}
-                </select>
+                <span className="text-xs text-slate-500">
+                    Green dot = active on the selected date. {isLoading ? "Reports are still loading." : "Activity requires GPS points and house records."}
+                </span>
             </label>
         </div>
     );
@@ -183,50 +166,94 @@ function EmployeeAnalysisFilters({
 export default function EmployeeApiDashboard({
     beatData,
     employeeList,
-    ulbs,
-    selectedUlbId,
-    onSelectedUlbIdChange,
     onShowHighPriorityHouses,
     dateSelection = "live",
+    appliedRange = null,
     availableDates = [],
-    onDateSelectionChange,
+    loadedEmployeeIds = [],
+    isLoading = false,
+    isActive = false,
 }) {
     const beats = beatData?.beats || [];
-    const [selectedEmployeeId, setSelectedEmployeeId] = useState("");
+    const [selectedEmployeeId, setSelectedEmployeeId] = useState(ALL_EMPLOYEES);
     const [anomalyResult, setAnomalyResult] = useState(null);
     const [anomalyLoading, setAnomalyLoading] = useState(false);
     const [anomalyError, setAnomalyError] = useState("");
     const [houseMapDialog, setHouseMapDialog] = useState(null);
 
+    const activityDate = appliedRange?.toDate ||
+        (dateSelection === "live" ? availableDates.at(-1) || null : dateSelection || availableDates.at(-1) || null);
+    const beatsByEmployee = useMemo(() => {
+        const byEmployee = new Map();
+        beats.forEach((item) => {
+            const id = String(item.assignedEmployee?.id || item.beatUserId || "");
+            if (!id) return;
+            const assignedBeats = byEmployee.get(id) || [];
+            assignedBeats.push(item);
+            byEmployee.set(id, assignedBeats);
+        });
+        return byEmployee;
+    }, [beats]);
+    const loadedEmployeeIdSet = useMemo(
+        () => new Set(loadedEmployeeIds.map(String)),
+        [loadedEmployeeIds],
+    );
     const employeeOptions = useMemo(() => {
         const source = employeeList?.employees || beats.map((item) => ({
             id: String(item.assignedEmployee.id),
             name: item.assignedEmployee.name,
         }));
-        const hasHouseRecordsByEmployee = new Map();
-        beats.forEach((item) => {
-            const id = String(item.assignedEmployee?.id || item.beatUserId || "");
-            if (!id) return;
-            hasHouseRecordsByEmployee.set(
-                id,
-                (hasHouseRecordsByEmployee.get(id) || false) || beatHasHouseRecords(item),
-            );
-        });
         const uniqueEmployees = [...new Map(source.map((employee) => [String(employee.id), {
             id: String(employee.id),
             name: employee.name,
+            isInactive: employee.isInactive,
         }])).values()].sort((a, b) => a.name.localeCompare(b.name));
-        return uniqueEmployees.map((employee) => ({
-            ...employee,
-            isInactive: hasHouseRecordsByEmployee.has(employee.id) &&
-                !hasHouseRecordsByEmployee.get(employee.id),
-        }));
-    }, [beats, employeeList]);
+        return uniqueEmployees.map((employee) => {
+            const assignedBeats = beatsByEmployee.get(employee.id) || [];
+            const isReportLoaded = loadedEmployeeIdSet.has(employee.id) ||
+                (!loadedEmployeeIds.length && assignedBeats.length > 0);
+            const isActiveToday = isEmployeeActiveOnDate(assignedBeats, employee.id, activityDate);
+            return {
+                ...employee,
+                isReportLoaded,
+                isActiveToday,
+                activityStatus: isActiveToday
+                    ? "Active today"
+                    : isLoading && !isReportLoaded
+                        ? "Report loading"
+                        : !activityDate
+                        ? "Date unavailable"
+                        : isReportLoaded
+                            ? "No activity today"
+                            : "Report unavailable",
+                beatNames: [...new Set(assignedBeats.map((item) => item.beatName).filter(Boolean))],
+                houseCount: assignedBeats.reduce((total, item) => total + (item.houses || []).length, 0),
+                gpsPointCount: assignedBeats.reduce((total, item) =>
+                    total + (item.routes || [])
+                        .filter((route) => route.date === activityDate)
+                        .reduce((count, route) => count + (route.trackPoints?.length || 0), 0),
+                0),
+            };
+        });
+    }, [activityDate, beats, beatsByEmployee, employeeList, isLoading, loadedEmployeeIdSet, loadedEmployeeIds.length]);
     useEffect(() => {
-        if (selectedEmployeeId && !employeeOptions.some((employee) => employee.id === selectedEmployeeId)) {
-            setSelectedEmployeeId("");
+        if (selectedEmployeeId !== ALL_EMPLOYEES &&
+            !employeeOptions.some((employee) => employee.id === selectedEmployeeId)) {
+            setSelectedEmployeeId(ALL_EMPLOYEES);
         }
     }, [employeeOptions, selectedEmployeeId]);
+    useEffect(() => {
+        if (isActive) setSelectedEmployeeId(ALL_EMPLOYEES);
+    }, [isActive]);
+
+    const activeEmployeeCount = employeeOptions.filter((employee) => employee.isActiveToday).length;
+    const inactiveEmployeeCount = employeeOptions.filter((employee) =>
+        Boolean(activityDate) && employee.isReportLoaded && !employee.isActiveToday
+    ).length;
+    const unavailableEmployeeCount = employeeOptions.length - activeEmployeeCount - inactiveEmployeeCount;
+    const allEmployeeReportDate = appliedRange
+        ? `${appliedRange.fromDate} to ${appliedRange.toDate}`
+        : activityDate || "Date unavailable";
 
     const beat = beats.find((item) =>
         String(item.assignedEmployee.id) === selectedEmployeeId
@@ -247,22 +274,19 @@ export default function EmployeeApiDashboard({
             )
             .sort();
     }, [beat]);
-    const dateOptions = useMemo(
-        () => [...new Set([...availableDates, ...analysisDateOptions])].sort(),
-        [analysisDateOptions, availableDates],
-    );
     const routes = useMemo(() => (beat?.routes || []).filter((route) =>
         (!beat?.fromDate || route.date >= beat.fromDate) &&
         (!beat?.toDate || route.date <= beat.toDate)
     ), [beat]);
-    const effectiveEndDate = dateSelection === "live"
+    const effectiveEndDate = appliedRange?.toDate || (dateSelection === "live"
         ? analysisDateOptions.at(-1) || beat?.toDate || null
-        : dateSelection || analysisDateOptions.at(-1) || beat?.toDate || null;
+        : dateSelection || analysisDateOptions.at(-1) || beat?.toDate || null);
     const rollingStartDate = addDays(effectiveEndDate, -29);
     const dataStartDate = beat?.fromDate || analysisDateOptions[0] || effectiveEndDate;
-    const effectiveStartDate = rollingStartDate && dataStartDate > rollingStartDate
+    const selectedPeriodStart = appliedRange?.fromDate || rollingStartDate;
+    const effectiveStartDate = selectedPeriodStart && dataStartDate > selectedPeriodStart
         ? dataStartDate
-        : rollingStartDate || dataStartDate;
+        : selectedPeriodStart || dataStartDate;
     const historicalDataStartDate = useMemo(() => {
         if (!beat) return effectiveEndDate;
         const dates = [
@@ -644,36 +668,124 @@ export default function EmployeeApiDashboard({
             }));
     };
 
+    if (selectedEmployeeId === ALL_EMPLOYEES) {
+        return (
+            <div className="h-full overflow-y-auto bg-slate-50 p-4">
+                <div className="mx-auto flex max-w-7xl flex-col gap-4">
+                    <header className="rounded-xl bg-white p-5 shadow-sm">
+                        <div className="flex flex-wrap items-start justify-between gap-4">
+                            <div>
+                                <h1 className="text-2xl font-bold text-slate-900">Employee Analysis</h1>
+                                <p className="mt-1 text-sm text-slate-600">
+                                    Daily activity across employees in the ULB selected in shared Filters.
+                                </p>
+                            </div>
+                            <EmployeeAnalysisFilters
+                                employeeOptions={employeeOptions}
+                                selectedEmployeeId={selectedEmployeeId}
+                                onSelectedEmployeeIdChange={setSelectedEmployeeId}
+                                isLoading={isLoading}
+                            />
+                        </div>
+                        <p className="mt-3 text-xs text-slate-500">
+                            Activity date: {allEmployeeReportDate}
+                            {appliedRange ? " · Status indicators use the range end date." : ""}
+                        </p>
+                    </header>
+
+                    <section aria-label="All employee daily activity" className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                        <Card label="Employees in ULB" value={formatNumber(employeeOptions.length)} />
+                        <Card label="Active on selected date" value={formatNumber(activeEmployeeCount)} tone="text-green-700" />
+                        <Card label="No activity on selected date" value={formatNumber(inactiveEmployeeCount)} tone="text-slate-700" />
+                        <Card
+                            label="Report pending / unavailable"
+                            value={formatNumber(unavailableEmployeeCount)}
+                            detail="Not counted as inactive"
+                            tone="text-amber-700"
+                        />
+                    </section>
+
+                    <section aria-labelledby="employee-activity-list-heading" className="overflow-hidden rounded-xl bg-white shadow-sm">
+                        <div className="p-4">
+                            <h2 id="employee-activity-list-heading" className="font-semibold text-slate-900">All employees</h2>
+                            <p className="mt-1 text-sm text-slate-600">
+                                Select an employee in the dropdown for their full collection and house analysis.
+                            </p>
+                        </div>
+                        <div className="max-h-[34rem] overflow-auto">
+                            <table className="w-full min-w-[680px] text-left text-sm">
+                                <thead className="sticky top-0 bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                    <tr>
+                                        <th scope="col" className="p-3">Employee</th>
+                                        <th scope="col" className="p-3">Assigned Beat</th>
+                                        <th scope="col" className="p-3">Houses</th>
+                                        <th scope="col" className="p-3">GPS points</th>
+                                        <th scope="col" className="p-3">Activity</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {employeeOptions.map((employee) => {
+                                        const statusClass = employee.isActiveToday
+                                            ? "text-green-700"
+                                            : employee.isReportLoaded
+                                                ? "text-slate-600"
+                                                : "text-amber-700";
+                                        return (
+                                            <tr key={employee.id} className="border-t border-slate-100">
+                                                <th scope="row" className="p-3 font-medium text-slate-800">
+                                                    {employee.name}
+                                                    <span className="ml-2 text-xs font-normal text-slate-500">ID: {employee.id}</span>
+                                                </th>
+                                                <td className="p-3 text-slate-600">
+                                                    {employee.beatNames.length ? employee.beatNames.join(", ") : "No Beat report"}
+                                                </td>
+                                                <td className="p-3 tabular-nums text-slate-600">{formatNumber(employee.houseCount)}</td>
+                                                <td className="p-3 tabular-nums text-slate-600">{formatNumber(employee.gpsPointCount)}</td>
+                                                <td className={`p-3 font-medium ${statusClass}`}>
+                                                    <span aria-hidden="true">{employee.isActiveToday ? "●" : employee.isReportLoaded ? "○" : "◌"}</span>
+                                                    <span className="ml-2">{employee.activityStatus}</span>
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
+                                    {!employeeOptions.length && (
+                                        <EmptyRow columns={5}>
+                                            {!employeeList
+                                                ? isLoading
+                                                    ? "Loading the selected ULB's employee list and reports…"
+                                                    : "Select a ULB above to load employee data."
+                                                : "The selected ULB has no employees in the employee API response."}
+                                        </EmptyRow>
+                                    )}
+                                </tbody>
+                            </table>
+                        </div>
+                    </section>
+                </div>
+            </div>
+        );
+    }
+
     if (!selectedEmployeeId) {
-        const hasEmployeeList = Boolean(employeeList);
         return (
             <div className="h-full overflow-y-auto bg-slate-50 p-4">
                 <section className="mx-auto flex max-w-7xl flex-col gap-4 rounded-xl bg-white p-5 shadow-sm">
                     <div>
                         <h1 className="text-2xl font-bold text-slate-900">Employee Analysis</h1>
-                        <p className="mt-1 text-sm text-slate-600">Choose a ULB and employee to view that employee&apos;s analysis.</p>
+                        <p className="mt-1 text-sm text-slate-600">Choose an employee from the ULB selected above.</p>
                     </div>
                     <EmployeeAnalysisFilters
-                        ulbs={ulbs}
-                        selectedUlbId={selectedUlbId}
-                        onSelectedUlbIdChange={onSelectedUlbIdChange}
                         employeeOptions={employeeOptions}
                         selectedEmployeeId={selectedEmployeeId}
                         onSelectedEmployeeIdChange={setSelectedEmployeeId}
-                        dateSelection={dateSelection}
-                        dateOptions={dateOptions}
-                        onDateSelectionChange={onDateSelectionChange}
+                        isLoading={isLoading}
                     />
                     <p role="status" className="rounded border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
-                        {!selectedUlbId
-                            ? "Upload the ULB list, then select a ULB."
-                            : !hasEmployeeList && !beats.length
-                                ? "Upload the employee list and Beat/API files for this ULB."
-                                : !employeeOptions.length
-                                    ? "No employees are available for this ULB."
-                                    : !selectedEmployeeId
-                                        ? "Select an employee to view their analysis."
-                                        : "No Beat/API data is loaded for this ULB."}
+                        {!employeeList
+                            ? "Select a ULB above to load its employee data."
+                            : !employeeOptions.length
+                                ? "The selected ULB has no employees in the employee API response."
+                                : "Select an employee to view their analysis."}
                     </p>
                 </section>
             </div>
@@ -686,21 +798,16 @@ export default function EmployeeApiDashboard({
                 <section className="mx-auto flex max-w-7xl flex-col gap-4 rounded-xl bg-white p-5 shadow-sm">
                     <div>
                         <h1 className="text-2xl font-bold text-slate-900">Employee Analysis</h1>
-                        <p className="mt-1 text-sm text-slate-600">Choose an employee with uploaded Beat/API data.</p>
+                        <p className="mt-1 text-sm text-slate-600">Choose an employee with a loaded report.</p>
                     </div>
                     <EmployeeAnalysisFilters
-                        ulbs={ulbs}
-                        selectedUlbId={selectedUlbId}
-                        onSelectedUlbIdChange={onSelectedUlbIdChange}
                         employeeOptions={employeeOptions}
                         selectedEmployeeId={selectedEmployeeId}
                         onSelectedEmployeeIdChange={setSelectedEmployeeId}
-                        dateSelection={dateSelection}
-                        dateOptions={dateOptions}
-                        onDateSelectionChange={onDateSelectionChange}
+                        isLoading={isLoading}
                     />
                     <p role="status" className="rounded border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
-                        No Beat/API data is loaded for the selected employee in this ULB.
+                        No report data is available for this employee. Check the API loading status above and retry if needed.
                     </p>
                 </section>
             </div>
@@ -719,15 +826,10 @@ export default function EmployeeApiDashboard({
                             </p>
                         </div>
                         <EmployeeAnalysisFilters
-                            ulbs={ulbs}
-                            selectedUlbId={selectedUlbId}
-                            onSelectedUlbIdChange={onSelectedUlbIdChange}
                             employeeOptions={employeeOptions}
                             selectedEmployeeId={selectedEmployeeId}
                             onSelectedEmployeeIdChange={setSelectedEmployeeId}
-                            dateSelection={dateSelection}
-                            dateOptions={dateOptions}
-                            onDateSelectionChange={onDateSelectionChange}
+                            isLoading={isLoading}
                         />
                     </div>
                     <p className="mt-3 text-xs text-slate-500">
@@ -929,7 +1031,7 @@ export default function EmployeeApiDashboard({
                     <div>
                         <h2 className="text-lg font-semibold text-slate-900">My Collection Outside My Beat</h2>
                         <p className="mt-1 text-xs text-slate-600">
-                            Counts distinct houses in other uploaded Beats scanned by this employee&apos;s ScannerUserId. This does not affect My Beat coverage.
+                            Counts distinct houses in other loaded Beats scanned by this employee&apos;s ScannerUserId. This does not affect My Beat coverage.
                         </p>
                     </div>
                     <button
@@ -937,7 +1039,7 @@ export default function EmployeeApiDashboard({
                         disabled={!beats.length || !outsideBeatAnalysis.totalHouses}
                         onClick={() => openHouseMap(
                             `Collected outside My Beat (${formatNumber(outsideBeatAnalysis.totalHouses)})`,
-                            `Houses collected by ${beat.assignedEmployee.name} in other uploaded Beats during the selected reporting period.`,
+                            `Houses collected by ${beat.assignedEmployee.name} in other loaded Beats during the selected reporting period.`,
                             outsideBeatAnalysis.byBeat.flatMap((item) => outsideBeatMapRows(item)),
                             outsideBeatAnalysis.byBeat.flatMap((item) =>
                                 otherBeats.find((otherBeat) => otherBeat.id === item.beatId)?.fencePolygons || []
@@ -993,14 +1095,14 @@ export default function EmployeeApiDashboard({
                                 {!outsideBeatAnalysis.byBeat.length && (
                                     <EmptyRow columns={3}>{beats.length > 1
                                         ? "No outside-Beat collection by this employee could be verified in this period."
-                                        : "Upload other Beat data to verify outside-Beat collections."}</EmptyRow>
+                                        : "No other Beat reports are available for this employee in the selected ULB."}</EmptyRow>
                                 )}
                             </tbody>
                         </table>
                     </div>
                     {outsideBeatAnalysis.unmatchedScanCount > 0 && (
                         <p className="mt-2 text-xs text-slate-500">
-                            {formatNumber(outsideBeatAnalysis.unmatchedScanCount)} scan(s) by this employee could not be matched to exactly one house in another uploaded Beat and are not included.
+                            {formatNumber(outsideBeatAnalysis.unmatchedScanCount)} scan(s) by this employee could not be matched to exactly one house in another loaded Beat and are not included.
                         </p>
                     )}
                 </section>
@@ -1051,7 +1153,7 @@ export default function EmployeeApiDashboard({
                 {(beat.historyWarnings?.unmatchedCollectionRecords > 0 ||
                     beat.historyWarnings?.ambiguousReferenceRecords > 0) && (
                     <p role="status" className="rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
-                        {formatNumber(beat.historyWarnings.unmatchedCollectionRecords)} route collection record(s) did not match a house in this Beat and are not counted unless they match a house in another uploaded Beat.
+                        {formatNumber(beat.historyWarnings.unmatchedCollectionRecords)} route collection record(s) did not match a house in this Beat and are not counted unless they match a house in another loaded Beat.
                         {beat.historyWarnings.ambiguousReferenceRecords > 0 &&
                             ` ${formatNumber(beat.historyWarnings.ambiguousReferenceRecords)} ambiguous reference record(s) were excluded from house history.`}
                     </p>

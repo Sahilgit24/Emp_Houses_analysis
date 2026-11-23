@@ -895,7 +895,7 @@ export default function BeatHouseRoutePlanner({
     highPriorityHouseRequest,
     dateSelection = "live",
     availableDates = [],
-    onDateSelectionChange,
+    appliedRange = null,
 }) {
     const [selectedBeatId, setSelectedBeatId] = useState("");
     const [selectedEmployeeKey, setSelectedEmployeeKey] = useState(ALL_EMPLOYEES);
@@ -978,9 +978,9 @@ export default function BeatHouseRoutePlanner({
         });
         return [...dates].sort();
     }, [dateScopeBeats]);
-    const selectedDate = dateSelection === "live"
+    const selectedDate = appliedRange?.toDate || (dateSelection === "live"
         ? scopedDateOptions.at(-1) || availableDates.at(-1) || ""
-        : dateSelection;
+        : dateSelection);
     const employeeRouteLayers = useMemo(() =>
         employeesInScope.flatMap((employee) => {
             const routeDay = employee.days.find((item) => item.date === selectedDate);
@@ -1267,7 +1267,7 @@ export default function BeatHouseRoutePlanner({
         setGeofenceError("");
         clearResults();
         setNotice(
-            `The new geofence for ${beat.assignedEmployee.name} is active for this session. The uploaded Beat data was not changed.`
+            `The new geofence for ${beat.assignedEmployee.name} is active for this session. API report data was not changed.`
         );
     };
 
@@ -1409,9 +1409,14 @@ export default function BeatHouseRoutePlanner({
                 <section className="rounded-xl bg-white p-5 shadow-sm">
                     <h1 className="text-2xl font-bold text-slate-900">Beat House Route Planner</h1>
                     <p className="mt-1 text-sm text-slate-600">
-                        Beat ownership and house status come from the shared API upload above. The planner uses the assigned employee&apos;s recorded GPS route as the actual route, then compares it with a route for houses without a recorded collection scan.
+                        Beat ownership and house status come from the selected ULB&apos;s API reports. The planner uses the assigned employee&apos;s recorded GPS route as the actual route, then compares it with a route for houses without a recorded collection scan.
                         Public OSRM routing is used by default, so house and GPS coordinates are sent to its routing service.
                     </p>
+                    {appliedRange && (
+                        <p role="status" className="mt-2 text-xs text-blue-800">
+                            Applied range: {appliedRange.fromDate} to {appliedRange.toDate}. The route map shows the range end date ({selectedDate}).
+                        </p>
+                    )}
                     <div className="mt-4 flex flex-wrap items-end gap-4">
                         {beatFiles.length > 0 && (
                             <label className="flex flex-col gap-1 text-sm font-medium text-slate-700">
@@ -1481,31 +1486,6 @@ export default function BeatHouseRoutePlanner({
                                     {employeeOptions.map((employeeId) => (
                                         <option key={employeeId.id} value={employeeId.id} style={{color: employeeId.color}}>
                                             ● {employeeId.name} ({employeeId.employeeId}) · {employeeId.beatName} · {employeeId.color}
-                                        </option>
-                                    ))}
-                                </select>
-                            </label>
-                        )}
-                        {availableDates.length > 0 && (
-                            <label className="flex flex-col gap-1 text-sm font-medium text-slate-700">
-                                {selectedEmployee ? "Employee route date" : "Route date"}
-                                <select value={dateSelection} onChange={(event) => {
-                                    onDateSelectionChange?.(event.target.value);
-                                    setShowCollectedOnly(false);
-                                    clearResults();
-                                    setError("");
-                                    setNotice("");
-                                }} className="rounded border border-slate-300 bg-white p-2">
-                                    <option value="live">
-                                        Live date{scopedDateOptions.at(-1) ? ` (${scopedDateOptions.at(-1)})` : ""}
-                                    </option>
-                                    {availableDates.map((date) => (
-                                        <option key={date} value={date}>
-                                            {date}{!days.some((item) => item.date === date)
-                                                ? " (no route record)"
-                                                : days.find((item) => item.date === date)?.trackPoints.length
-                                                    ? ""
-                                                    : " (no GPS points)"}
                                         </option>
                                     ))}
                                 </select>
@@ -1684,7 +1664,7 @@ export default function BeatHouseRoutePlanner({
                                 </p>
                             )}
                             <p className="mt-2 text-xs text-slate-500">
-                                Keeping applies the fence for this browser session only; the uploaded Beat data is unchanged.
+                                Keeping applies the fence for this browser session only; API report data is unchanged.
                             </p>
                         </section>
                     )}
@@ -1695,7 +1675,7 @@ export default function BeatHouseRoutePlanner({
                     )}
                     {selectedEmployeeKey !== ALL_EMPLOYEES && !selectedEmployee && (
                         <p role="status" className="mt-2 rounded border border-amber-300 bg-amber-50 p-2 text-xs text-amber-900">
-                            The selected Beat has no assigned employee route in this API file.
+                            The selected Beat has no assigned employee route in its API report.
                         </p>
                     )}
                     {selectedBeatId && beat && !beat.houses.length && (
@@ -1729,7 +1709,7 @@ export default function BeatHouseRoutePlanner({
                     )}
                     {!beatData && (
                         <p role="status" className="mt-3 rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
-                            Upload the API file above to load Beat, house, and route data.
+                            Select a ULB above to load Beat, house, and route data.
                         </p>
                     )}
                     {day && day.trackPoints.length === 0 && (

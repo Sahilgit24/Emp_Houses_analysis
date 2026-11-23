@@ -1,3 +1,5 @@
+import {beatHasHouseRecords} from "./beatApiData.js";
+
 function median(values) {
     const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
     if (!sorted.length) return null;
@@ -48,6 +50,17 @@ export function getReportWindowDays(fromDate, toDate) {
     const end = Date.parse(`${toDate.slice(0, 10)}T00:00:00Z`);
     if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null;
     return Math.floor((end - start) / 86400000) + 1;
+}
+
+export function isEmployeeActiveOnDate(beats, employeeId, date) {
+    if (!date) return false;
+    return beats.some((beat) =>
+        String(beat.assignedEmployee?.id || beat.beatUserId || "") === String(employeeId) &&
+        beatHasHouseRecords(beat) &&
+        (beat.routes || []).some((route) =>
+            route.date === date && route.trackPoints?.length > 0
+        )
+    );
 }
 
 export function summarizeDailyEmployeeReport(coverage, routes, selectedDate) {

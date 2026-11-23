@@ -2,8 +2,14 @@ function beatKey(ulbId, beatId) {
     return `${ulbId}\u0000${beatId}`;
 }
 
-export function findOutsideBeatCollectionAlerts(sources, ulbs, employeeListsByUlb, date) {
-    if (!date) return [];
+export function findOutsideBeatCollectionAlerts(
+    sources,
+    ulbs,
+    employeeListsByUlb,
+    fromDate,
+    toDate = fromDate,
+) {
+    if (!fromDate || !toDate || fromDate > toDate) return [];
 
     const ulbNames = new Map(ulbs.map((ulb) => [String(ulb.id), ulb.name]));
     const employeeNames = new Map();
@@ -41,7 +47,7 @@ export function findOutsideBeatCollectionAlerts(sources, ulbs, employeeListsByUl
         (targetBeat.houses || []).forEach((house) => {
             (house.historyEvents || []).forEach((event) => {
                 const employeeId = String(event.scannerUserId || "");
-                if (!employeeId || event.date !== date) return;
+                if (!employeeId || !event.date || event.date < fromDate || event.date > toDate) return;
                 const assignments = assignedBeatsByEmployee.get(employeeId) || [];
                 if (!assignments.length || assignments.some((assignment) =>
                     assignment.key === beatKey(targetUlbId, targetBeat.id)
@@ -50,8 +56,8 @@ export function findOutsideBeatCollectionAlerts(sources, ulbs, employeeListsByUl
                 const employeeUlbIds = [...new Set(assignments.map((assignment) => assignment.ulbId))];
                 const employeeUlbNames = employeeUlbIds.map((id) => ulbNames.get(id) || id).filter(Boolean);
                 const alert = {
-                    id: `${date}-${employeeId}-${targetUlbId}-${targetBeat.id}-${house.houseId}`,
-                    date,
+                    id: `${event.date}-${employeeId}-${targetUlbId}-${targetBeat.id}-${house.houseId}`,
+                    date: event.date,
                     houseId: house.houseId,
                     employeeId,
                     employeeName: employeeNames.get(employeeId) || event.scannerName || `Employee ${employeeId}`,
@@ -65,6 +71,7 @@ export function findOutsideBeatCollectionAlerts(sources, ulbs, employeeListsByUl
     });
 
     return [...uniqueAlerts.values()].sort((a, b) =>
+        a.date.localeCompare(b.date) ||
         a.ulbName.localeCompare(b.ulbName) ||
         a.employeeName.localeCompare(b.employeeName) ||
         a.houseId.localeCompare(b.houseId)

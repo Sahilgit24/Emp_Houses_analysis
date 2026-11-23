@@ -27,7 +27,7 @@ export default function StateUlbFilters({
                     <option value={includeAllUlbs ? "all" : ""}>
                         {ulbs.length
                             ? includeAllUlbs ? "All ULBs" : "Select a ULB"
-                            : "Upload ULB list"}
+                            : "ULB list unavailable"}
                     </option>
                     {ulbs.map((ulb) => (
                         <option key={ulb.id} value={ulb.id}>{ulb.name}</option>

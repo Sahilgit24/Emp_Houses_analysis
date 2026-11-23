@@ -129,11 +129,19 @@
   body {
     @apply bg-background text-foreground;
     min-width: 320px;
-    min-height: 100vh;
+    min-height: 0;
+    height: 100%;
+    overflow: hidden;
   }
 }
 
-.app-shell { background: #f3f6fb; }
+.app-shell {
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+  background: #f3f6fb;
+}
 .app-sidebar {
   display: flex;
   width: 264px;
@@ -146,7 +154,8 @@
   z-index: 500;
 }
 .app-brand { display: flex; align-items: center; gap: 11px; padding: 0 6px; }
-.app-workspace { overflow: hidden; }
+.app-workspace { min-height: 0; overflow: hidden; }
+.app-workspace > main { min-height: 0; overflow: hidden; }
 .app-brand-mark {
   display: grid; width: 38px; height: 38px; place-items: center;
   color: white; background: linear-gradient(145deg, #2563eb, #0f766e);

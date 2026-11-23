@@ -83,6 +83,23 @@ test("reports the collection ULB when an employee scans in another ULB", () => {
     assert.equal(alerts[0].ulbName, "Aarmori Nagar Parishad");
 });
 
+test("includes outside-Beat alerts on every date in an inclusive range", () => {
+    const alerts = findOutsideBeatCollectionAlerts([
+        source("3339", "own-beat", "7", []),
+        source("3339", "other-beat", "8", [{
+            houseId: "H-RANGE",
+            historyEvents: [
+                {date: "2026-11-16", scannerUserId: "7"},
+                {date: "2026-11-17", scannerUserId: "7"},
+                {date: "2026-11-18", scannerUserId: "7"},
+                {date: "2026-11-19", scannerUserId: "7"},
+            ],
+        }]),
+    ], [{id: "3339", name: "Amalner Nagar Parishad"}], {}, "2026-11-17", "2026-11-18");
+
+    assert.deepEqual(alerts.map(({date}) => date), ["2026-11-17", "2026-11-18"]);
+});
+
 test("returns no alerts without a selected date", () => {
     assert.deepEqual(findOutsideBeatCollectionAlerts([], [], {}, ""), []);
 });

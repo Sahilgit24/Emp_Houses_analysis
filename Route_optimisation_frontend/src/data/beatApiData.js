@@ -258,8 +258,14 @@ function normalizeBeat(report, routeDetails, index) {
 
     const rawGeofence = firstValue(report, ["geofence", "Geofence", "GeoFence"]) ??
         firstValue(routeDetails, ["geofence", "Geofence", "GeoFence"]);
-    const fencePolygons = parseGeofence(rawGeofence, `Beat ${beatId} geofence`);
-    const fencePoints = fencePolygons[0];
+    const hasReportedHouses = houses.length > 0 || Number(report.TotalHouses) > 0;
+    const hasGeofence = typeof rawGeofence === "string"
+        ? Boolean(rawGeofence.trim())
+        : Array.isArray(rawGeofence) && rawGeofence.length > 0;
+    const fencePolygons = !hasGeofence && !hasReportedHouses
+        ? []
+        : parseGeofence(rawGeofence, `Beat ${beatId} geofence`);
+    const fencePoints = fencePolygons[0] || [];
     const routeHouseCoordinates = [];
     const routeCoordinateKeys = new Set();
     const coordinatesByKey = new Map();
@@ -428,7 +434,7 @@ function normalizeBeat(report, routeDetails, index) {
     };
 }
 
-export function normalizeBeatApiPayload(payload, sourceName = "API file") {
+export function normalizeBeatApiPayload(payload, sourceName = "API report") {
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
         throw new Error(`${sourceName} must contain a JSON object.`);
     }
@@ -459,7 +465,7 @@ export function normalizeBeatApiPayload(payload, sourceName = "API file") {
 
 export function combineNormalizedBeatData(sources) {
     if (!Array.isArray(sources) || sources.length === 0) {
-        throw new Error("At least one normalized Beat API file is required.");
+        throw new Error("At least one normalized Beat API report is required.");
     }
 
     const beats = [];
@@ -473,7 +479,7 @@ export function combineNormalizedBeatData(sources) {
                 const existingSource = beatSources.get(beat.id);
                 throw new Error(
                     `Beat ID "${beat.id}" appears in both "${existingSource}" and "${source.sourceName}". ` +
-                    "Upload each Beat once, or give separate Beats distinct Beat IDs.",
+                    "Each Beat report must use a distinct Beat ID.",
                 );
             }
             beatSources.set(beat.id, source.sourceName);
