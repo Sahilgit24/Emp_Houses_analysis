@@ -12,6 +12,35 @@ import {
 } from "../data/employeePerformance.js";
 import {API_URL} from "../config.js";
 import AnalysisHouseMapDialog from "./AnalysisHouseMapDialog.jsx";
+import {
+    Activity,
+    ArrowDownRight,
+    ArrowRight,
+    ArrowUpRight,
+    CalendarDays,
+    Info,
+    TriangleAlert,
+    CalendarCheck,
+    CalendarClock,
+    CalendarRange,
+    CircleAlert,
+    CircleCheck,
+    Clock3,
+    History,
+    Home,
+    ListChecks,
+    MapPinned,
+    Percent,
+    Radar,
+    Repeat,
+    ShieldAlert,
+    TrendingUp,
+    UserCheck,
+    UsersRound,
+    UserX,
+} from "lucide-react";
+import {Avatar, HeroIcon, MiniBar, SectionIcon, StatIcon} from "./common/Decor.jsx";
+import {toneFromTextClass} from "./common/decorTones.js";
 
 const ALL_EMPLOYEES = "all";
 
@@ -45,12 +74,98 @@ function addDays(date, days) {
         : null;
 }
 
-function Card({label, value, detail, tone = "text-slate-900", onClick}) {
+/** Horizontal bars comparing two values that are already shown on the page. */
+function ComparisonBars({rows, max}) {
+    const scale = Math.max(1, max ?? Math.max(0, ...rows.map((row) => Number(row.value) || 0)));
+    return (
+        <div className="flex flex-col gap-3">
+            {rows.map((row) => {
+                const available = row.value != null && Number.isFinite(Number(row.value));
+                const width = available ? Math.max(1.5, Math.min(100, Number(row.value) / scale * 100)) : 100;
+                return (
+                    <div key={row.key} className="compare-row">
+                        <div className="compare-label">
+                            <span className="truncate font-semibold text-slate-800">{row.label}</span>
+                            {row.badge}
+                        </div>
+                        <div className={`compare-track ${available ? "" : "is-unavailable"}`}>
+                            {available && <span className={`tone-${row.tone}`} style={{width: `${width}%`}}/>}
+                        </div>
+                        <span className={`compare-value ${available ? "" : "text-slate-400"}`}>{row.display}</span>
+                    </div>
+                );
+            })}
+        </div>
+    );
+}
+
+/** Up / down / flat badge for a change that is already calculated. */
+function DeltaBadge({value, children}) {
+    const tone = value == null ? "slate" : value > 0 ? "emerald" : value < 0 ? "amber" : "slate";
+    const Icon = value == null || value === 0 ? ArrowRight : value > 0 ? ArrowUpRight : ArrowDownRight;
+    return (
+        <span className={`delta-badge tone-${tone}`}>
+            <Icon aria-hidden="true"/>
+            {children}
+        </span>
+    );
+}
+
+/** One collection-pattern finding: icon, headline number, share of Beat houses, original sentence. */
+function PatternTile({icon: Icon, tone, title, value, share, total, className = "", children}) {
+    return (
+        <li className={`pattern-tile tone-${tone} ${className}`}>
+            <div className="flex items-start gap-3">
+                <span className="stat-icon" aria-hidden="true"><Icon/></span>
+                <div className="min-w-0 flex-1">
+                    <p className="text-sm font-semibold text-slate-900">{title}</p>
+                    {value != null && <p className="pattern-value">{value}</p>}
+                </div>
+            </div>
+            {share != null && <MiniBar value={share} total={total} tone={tone}/>}
+            <p className="mt-2 text-sm leading-5 text-slate-600">{children}</p>
+        </li>
+    );
+}
+
+const SEVERITY_TONES = {High: "red", Medium: "amber", Low: "blue"};
+
+// Corner icon for each card, chosen from the card's existing label.
+const CARD_ICONS = [
+    [/^Employees in ULB/, UsersRound],
+    [/^Active on/, UserCheck],
+    [/^No activity/, UserX],
+    [/^Report pending/, Clock3],
+    [/^Total Houses/, Home],
+    [/^Collected by Me/, CircleCheck],
+    [/^Collected by Other/, UsersRound],
+    [/^Not (Collected|Scanned)/, CircleAlert],
+    [/Coverage$/, Percent],
+    [/^Attendance/, CalendarCheck],
+    [/^Yesterday/, CalendarClock],
+    [/^Houses collected/, Home],
+    [/^Change vs/, TrendingUp],
+    [/^Previous matching/, History],
+    [/^Selected period/, CalendarRange],
+    [/^Coverage change/, TrendingUp],
+    [/^Direction/, ArrowUpRight],
+];
+
+function cardIconFor(label) {
+    return CARD_ICONS.find(([pattern]) => pattern.test(String(label)))?.[1] || Activity;
+}
+
+function Card({label, value, detail, tone = "text-slate-900", onClick, barValue, barTotal}) {
+    const accent = toneFromTextClass(tone);
     const content = (
         <>
-            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</p>
-            <p className={`mt-2 text-2xl font-bold ${tone}`}>{value}</p>
+            <div className="stat-card-head w-full">
+                <p className="min-h-8 text-xs font-semibold uppercase leading-4 tracking-wide text-slate-500">{label}</p>
+                <StatIcon icon={cardIconFor(label)} tone={accent}/>
+            </div>
+            <p className={`text-2xl font-bold ${tone}`}>{value}</p>
             {detail && <p className="mt-1 text-xs text-slate-500">{detail}</p>}
+            <span className="block w-full"><MiniBar value={barValue} total={barTotal} tone={accent}/></span>
         </>
     );
 
@@ -59,7 +174,7 @@ function Card({label, value, detail, tone = "text-slate-900", onClick}) {
             <button
                 type="button"
                 onClick={onClick}
-                className="w-full rounded-lg border border-slate-200 bg-white p-4 text-left transition hover:border-green-300 hover:bg-green-50/40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-green-600"
+                className={`stat-card tone-${accent} flex h-full w-full flex-col items-start justify-start rounded-xl border border-slate-200 bg-white p-4 text-left shadow-sm transition hover:border-green-300 hover:bg-green-50/40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-green-600`}
             >
                 {content}
             </button>
@@ -67,7 +182,7 @@ function Card({label, value, detail, tone = "text-slate-900", onClick}) {
     }
 
     return (
-        <article className="rounded-lg border border-slate-200 bg-white p-4">
+        <article className={`stat-card tone-${accent} h-full rounded-xl border border-slate-200 bg-white p-4 shadow-sm`}>
             {content}
         </article>
     );
@@ -166,7 +281,6 @@ function EmployeeAnalysisFilters({
 export default function EmployeeApiDashboard({
     beatData,
     employeeList,
-    onShowHighPriorityHouses,
     dateSelection = "live",
     appliedRange = null,
     availableDates = [],
@@ -174,7 +288,7 @@ export default function EmployeeApiDashboard({
     isLoading = false,
     isActive = false,
 }) {
-    const beats = beatData?.beats || [];
+    const beats = useMemo(() => beatData?.beats || [], [beatData]);
     const [selectedEmployeeId, setSelectedEmployeeId] = useState(ALL_EMPLOYEES);
     const [anomalyResult, setAnomalyResult] = useState(null);
     const [anomalyLoading, setAnomalyLoading] = useState(false);
@@ -553,14 +667,6 @@ export default function EmployeeApiDashboard({
         () => summarizeCollectionPatterns(historicalHouseCoverage),
         [historicalHouseCoverage],
     );
-    const highPriorityHouseIds = useMemo(
-        () => highPriorityHouses
-            .filter(({detail}) =>
-                Number.isFinite(detail.house.lat) && Number.isFinite(detail.house.lon)
-            )
-            .map(({detail}) => detail.house.houseId),
-        [highPriorityHouses],
-    );
     const attentionCounts = useMemo(() => {
         const counts = {regular: 0, lowFrequency: 0, needsAttention: 0, overdue: 0, withHistory: 0};
         historicalHouseCoverage.details.forEach((detail) => {
@@ -672,13 +778,16 @@ export default function EmployeeApiDashboard({
         return (
             <div className="h-full overflow-y-auto bg-slate-50 p-4">
                 <div className="mx-auto flex max-w-7xl flex-col gap-4">
-                    <header className="rounded-xl bg-white p-5 shadow-sm">
+                    <header className="page-hero page-hero-violet">
                         <div className="flex flex-wrap items-start justify-between gap-4">
-                            <div>
+                            <div className="page-hero-row">
+                                <HeroIcon icon={UsersRound} tone="violet"/>
+                                <div className="page-hero-text">
                                 <h1 className="text-2xl font-bold text-slate-900">Employee Analysis</h1>
                                 <p className="mt-1 text-sm text-slate-600">
                                     Daily activity across employees in the ULB selected in shared Filters.
                                 </p>
+                                </div>
                             </div>
                             <EmployeeAnalysisFilters
                                 employeeOptions={employeeOptions}
@@ -695,8 +804,8 @@ export default function EmployeeApiDashboard({
 
                     <section aria-label="All employee daily activity" className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                         <Card label="Employees in ULB" value={formatNumber(employeeOptions.length)} />
-                        <Card label="Active on selected date" value={formatNumber(activeEmployeeCount)} tone="text-green-700" />
-                        <Card label="No activity on selected date" value={formatNumber(inactiveEmployeeCount)} tone="text-slate-700" />
+                        <Card label="Active on selected date" value={formatNumber(activeEmployeeCount)} tone="text-green-700" barValue={activeEmployeeCount} barTotal={employeeOptions.length} />
+                        <Card label="No activity on selected date" value={formatNumber(inactiveEmployeeCount)} tone="text-slate-700" barValue={inactiveEmployeeCount} barTotal={employeeOptions.length} />
                         <Card
                             label="Report pending / unavailable"
                             value={formatNumber(unavailableEmployeeCount)}
@@ -707,7 +816,7 @@ export default function EmployeeApiDashboard({
 
                     <section aria-labelledby="employee-activity-list-heading" className="overflow-hidden rounded-xl bg-white shadow-sm">
                         <div className="p-4">
-                            <h2 id="employee-activity-list-heading" className="font-semibold text-slate-900">All employees</h2>
+                            <h2 id="employee-activity-list-heading" className="section-heading font-semibold text-slate-900"><SectionIcon icon={Activity} tone="blue"/>All employees</h2>
                             <p className="mt-1 text-sm text-slate-600">
                                 Select an employee in the dropdown for their full collection and house analysis.
                             </p>
@@ -733,8 +842,13 @@ export default function EmployeeApiDashboard({
                                         return (
                                             <tr key={employee.id} className="border-t border-slate-100">
                                                 <th scope="row" className="p-3 font-medium text-slate-800">
-                                                    {employee.name}
-                                                    <span className="ml-2 text-xs font-normal text-slate-500">ID: {employee.id}</span>
+                                                    <span className="person-cell">
+                                                        <Avatar name={employee.name}/>
+                                                        <span>
+                                                            {employee.name}
+                                                            <span className="ml-2 text-xs font-normal text-slate-500">ID: {employee.id}</span>
+                                                        </span>
+                                                    </span>
                                                 </th>
                                                 <td className="p-3 text-slate-600">
                                                     {employee.beatNames.length ? employee.beatNames.join(", ") : "No Beat report"}
@@ -742,8 +856,9 @@ export default function EmployeeApiDashboard({
                                                 <td className="p-3 tabular-nums text-slate-600">{formatNumber(employee.houseCount)}</td>
                                                 <td className="p-3 tabular-nums text-slate-600">{formatNumber(employee.gpsPointCount)}</td>
                                                 <td className={`p-3 font-medium ${statusClass}`}>
-                                                    <span aria-hidden="true">{employee.isActiveToday ? "●" : employee.isReportLoaded ? "○" : "◌"}</span>
-                                                    <span className="ml-2">{employee.activityStatus}</span>
+                                                    <span className={`status-pill tone-${employee.isActiveToday ? "emerald" : employee.isReportLoaded ? "slate" : "amber"}`}>
+                                                        {employee.activityStatus}
+                                                    </span>
                                                 </td>
                                             </tr>
                                         );
@@ -769,10 +884,13 @@ export default function EmployeeApiDashboard({
     if (!selectedEmployeeId) {
         return (
             <div className="h-full overflow-y-auto bg-slate-50 p-4">
-                <section className="mx-auto flex max-w-7xl flex-col gap-4 rounded-xl bg-white p-5 shadow-sm">
-                    <div>
+                <section className="page-hero page-hero-violet mx-auto flex max-w-7xl flex-col gap-4">
+                    <div className="page-hero-row">
+                        <HeroIcon icon={UsersRound} tone="violet"/>
+                        <div className="page-hero-text">
                         <h1 className="text-2xl font-bold text-slate-900">Employee Analysis</h1>
                         <p className="mt-1 text-sm text-slate-600">Choose an employee from the ULB selected above.</p>
+                        </div>
                     </div>
                     <EmployeeAnalysisFilters
                         employeeOptions={employeeOptions}
@@ -795,10 +913,13 @@ export default function EmployeeApiDashboard({
     if (!beat) {
         return (
             <div className="h-full overflow-y-auto bg-slate-50 p-4">
-                <section className="mx-auto flex max-w-7xl flex-col gap-4 rounded-xl bg-white p-5 shadow-sm">
-                    <div>
+                <section className="page-hero page-hero-violet mx-auto flex max-w-7xl flex-col gap-4">
+                    <div className="page-hero-row">
+                        <HeroIcon icon={UsersRound} tone="violet"/>
+                        <div className="page-hero-text">
                         <h1 className="text-2xl font-bold text-slate-900">Employee Analysis</h1>
                         <p className="mt-1 text-sm text-slate-600">Choose an employee with a loaded report.</p>
+                        </div>
                     </div>
                     <EmployeeAnalysisFilters
                         employeeOptions={employeeOptions}
@@ -817,13 +938,16 @@ export default function EmployeeApiDashboard({
     return (
         <div className="h-full overflow-y-auto bg-slate-50 p-4">
             <div className="mx-auto flex w-full max-w-7xl flex-col gap-4">
-                <header className="rounded-xl bg-white p-5 shadow-sm">
+                <header className="page-hero page-hero-violet">
                     <div className="flex flex-wrap items-start justify-between gap-4">
-                        <div>
+                        <div className="page-hero-row">
+                            <HeroIcon icon={UsersRound} tone="violet"/>
+                            <div className="page-hero-text">
                             <h1 className="text-2xl font-bold text-slate-900">Employee Analysis</h1>
                             <p className="mt-1 text-sm text-slate-600">
                                 House coverage and collection regularity for {beat.assignedEmployee.name}.
                             </p>
+                            </div>
                         </div>
                         <EmployeeAnalysisFilters
                             employeeOptions={employeeOptions}
@@ -838,31 +962,14 @@ export default function EmployeeApiDashboard({
                 </header>
 
                 <section aria-labelledby="beat-status-heading" className="flex flex-col gap-3">
-                    <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
                         <div>
-                            <h2 id="beat-status-heading" className="text-lg font-semibold text-slate-900">Beat Collection Status</h2>
+                            <h2 id="beat-status-heading" className="section-heading text-lg font-semibold text-slate-900"><SectionIcon icon={Home} tone="emerald"/>Beat Collection Status</h2>
                             <p className="mt-1 text-sm text-slate-600">
                                 In the selected {reportWindowLabel}, {formatNumber(totalHouses)} houses in My Beat: {formatNumber(ownCount)} collected by Me,{" "}
                                 {formatNumber(otherCount)} by other employees, and {formatNumber(remainingCount)} not collected.
                                 {" "}Overall Beat coverage is {beatCoveragePercent == null ? "unavailable" : `${formatNumber(beatCoveragePercent, 1)}%`}.
                             </p>
-                        </div>
-                        <div className="flex flex-col items-start gap-1">
-                            <button
-                                type="button"
-                                onClick={() => onShowHighPriorityHouses?.({
-                                    beatId: beat.id,
-                                    houseIds: highPriorityHouseIds,
-                                })}
-                                disabled={!highPriorityHouseIds.length || !onShowHighPriorityHouses}
-                                aria-label={`Show ${highPriorityHouseIds.length} high-priority houses for ${beat.beatName} on map`}
-                                className="rounded border border-amber-400 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-900 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
-                            >
-                                Show High-Priority Houses on Map ({formatNumber(highPriorityHouseIds.length)})
-                            </button>
-                            <span className="text-xs text-slate-500">
-                                High-priority houses have no scan recorded in BeatWiseReport history or a gap over 2.5 times their usual interval.
-                            </span>
                         </div>
                     </div>
                     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
@@ -871,13 +978,13 @@ export default function EmployeeApiDashboard({
                             value={formatNumber(totalHouses)}
                             onClick={() => openCoverageMap(houseCoverage, "all", "All houses in My Beat", `All houses in ${beat.beatName}.`)}
                         />
-                        <Card label="Collected by Me" value={formatNumber(ownCount)} tone="text-green-700"
+                        <Card label="Collected by Me" value={formatNumber(ownCount)} tone="text-green-700" barValue={ownCount} barTotal={totalHouses}
                             onClick={() => openCoverageMap(houseCoverage, "own", "Collected by Me", `Houses collected by ${beat.assignedEmployee.name} in the selected ${reportWindowLabel}.`)}
                             detail={`${ownCoveragePercent == null ? "Unavailable" : `${formatNumber(ownCoveragePercent, 1)}%`} in the selected reporting window; scanner must match the assigned employee.`} />
-                        <Card label="Collected by Other Employees" value={formatNumber(otherCount)} tone="text-amber-700"
+                        <Card label="Collected by Other Employees" value={formatNumber(otherCount)} tone="text-amber-700" barValue={otherCount} barTotal={totalHouses}
                             onClick={() => openCoverageMap(houseCoverage, "other", "Collected by Other Employees", `Houses collected by other employees in the selected ${reportWindowLabel}.`)}
                             detail="In the selected reporting window; these houses still belong to My Beat." />
-                        <Card label="Not Collected" value={formatNumber(remainingCount)} tone="text-red-700"
+                        <Card label="Not Collected" value={formatNumber(remainingCount)} tone="text-red-700" barValue={remainingCount} barTotal={totalHouses}
                             onClick={() => openCoverageMap(houseCoverage, "remaining", "Not Collected", `Houses without an identified employee scan in the selected ${reportWindowLabel}.`)}
                             detail="No identified employee scan in the selected reporting window." />
                         <Card label="Overall Beat Coverage" value={beatCoveragePercent == null ? "Unavailable" : `${formatNumber(beatCoveragePercent, 1)}%`}
@@ -890,7 +997,7 @@ export default function EmployeeApiDashboard({
                     </p>
                     {selectedDateCoverage && (
                         <div className="rounded-lg border border-blue-200 bg-blue-50/50 p-3">
-                            <h3 className="font-semibold text-slate-900">
+                            <h3 className="section-heading font-semibold text-slate-900"><SectionIcon icon={Radar} tone="blue"/>
                                 Selected date collection status · {formatDate(effectiveEndDate)}
                             </h3>
                             <p className="mt-1 text-sm text-slate-600">
@@ -902,11 +1009,11 @@ export default function EmployeeApiDashboard({
                                     value={formatNumber(totalHouses)}
                                     onClick={() => openCoverageMap(selectedDateCoverage, "all", "All houses on selected date", `All houses in ${beat.beatName}; collection status is evaluated for ${formatDate(effectiveEndDate)}.`)}
                                 />
-                                <Card label="Collected by Me" value={formatNumber(selectedDateCoverage.assignedEmployeeCollected)} tone="text-green-700"
+                                <Card label="Collected by Me" value={formatNumber(selectedDateCoverage.assignedEmployeeCollected)} tone="text-green-700" barValue={selectedDateCoverage.assignedEmployeeCollected} barTotal={totalHouses}
                                     onClick={() => openCoverageMap(selectedDateCoverage, "own", "Collected by Me on selected date", `Houses collected by ${beat.assignedEmployee.name} on ${formatDate(effectiveEndDate)}.`)} />
-                                <Card label="Collected by Other Employees" value={formatNumber(selectedDateCoverage.otherEmployeeCollected)} tone="text-amber-700"
+                                <Card label="Collected by Other Employees" value={formatNumber(selectedDateCoverage.otherEmployeeCollected)} tone="text-amber-700" barValue={selectedDateCoverage.otherEmployeeCollected} barTotal={totalHouses}
                                     onClick={() => openCoverageMap(selectedDateCoverage, "other", "Collected by Other Employees on selected date", `Houses collected by other employees on ${formatDate(effectiveEndDate)}.`)} />
-                                <Card label="Not Scanned on Selected Date" value={formatNumber(selectedDateCoverage.remainingWithoutHistory)} tone="text-red-700"
+                                <Card label="Not Scanned on Selected Date" value={formatNumber(selectedDateCoverage.remainingWithoutHistory)} tone="text-red-700" barValue={selectedDateCoverage.remainingWithoutHistory} barTotal={totalHouses}
                                     onClick={() => openCoverageMap(selectedDateCoverage, "remaining", "Not Scanned on Selected Date", `Houses with no identified employee scan on ${formatDate(effectiveEndDate)}.`)} />
                                 <Card
                                     label="Selected Date Coverage"
@@ -939,7 +1046,7 @@ export default function EmployeeApiDashboard({
                         <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
                             Collection follow-up
                         </p>
-                        <h2 className="mt-1 text-lg font-semibold text-slate-900">
+                        <h2 className="section-heading mt-1 text-lg font-semibold text-slate-900"><SectionIcon icon={ListChecks} tone="amber"/>
                             House Attention Queue
                         </h2>
                         <p className="mt-1 max-w-3xl text-sm leading-5 text-slate-600">
@@ -988,7 +1095,7 @@ export default function EmployeeApiDashboard({
 
                 <section className="rounded-xl bg-white p-4 shadow-sm">
                     <div>
-                        <h2 className="text-lg font-semibold text-slate-900">Houses Collected by Other Employees</h2>
+                        <h2 className="section-heading text-lg font-semibold text-slate-900"><SectionIcon icon={UsersRound} tone="amber"/>Houses Collected by Other Employees</h2>
                         <p className="mt-1 text-xs text-slate-600">
                             These houses belong to My Beat. Select an employee to see the houses they collected.
                         </p>
@@ -1029,7 +1136,7 @@ export default function EmployeeApiDashboard({
 
                 <section className="rounded-xl bg-white p-4 shadow-sm">
                     <div>
-                        <h2 className="text-lg font-semibold text-slate-900">My Collection Outside My Beat</h2>
+                        <h2 className="section-heading text-lg font-semibold text-slate-900"><SectionIcon icon={MapPinned} tone="violet"/>My Collection Outside My Beat</h2>
                         <p className="mt-1 text-xs text-slate-600">
                             Counts distinct houses in other loaded Beats scanned by this employee&apos;s ScannerUserId. This does not affect My Beat coverage.
                         </p>
@@ -1107,14 +1214,50 @@ export default function EmployeeApiDashboard({
                     )}
                 </section>
 
-                <section className="rounded-xl bg-white p-4 shadow-sm">
+                <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
                     <div>
-                        <h2 className="text-lg font-semibold text-slate-900">
+                        <h2 className="section-heading text-lg font-semibold text-slate-900"><SectionIcon icon={CalendarCheck} tone="blue"/>
                             Daily Attendance &amp; Collection
                         </h2>
                         <p className="mt-1 text-xs text-slate-600">
                             Compares {formatDate(effectiveEndDate)} with the immediately previous day. Attendance follows your rule: no GPS points means Absent.
                         </p>
+                    </div>
+                    <div className="insight-panel mt-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                            <p className="insight-panel-title"><CalendarDays aria-hidden="true"/>Houses collected</p>
+                            <DeltaBadge value={dailyHouseCountChange}>
+                                {`${dailyHouseCountChange > 0 ? "+" : ""}${formatNumber(dailyHouseCountChange)} houses`}
+                            </DeltaBadge>
+                        </div>
+                        <div className="mt-3">
+                            <ComparisonBars rows={[
+                                {
+                                    key: "selected",
+                                    label: formatDate(effectiveEndDate),
+                                    value: dailyEmployeeReport?.selectedDateHouseCount || 0,
+                                    display: `${formatNumber(dailyEmployeeReport?.selectedDateHouseCount || 0)} houses`,
+                                    tone: "blue",
+                                    badge: dailyEmployeeReport?.selectedDateAttendance && (
+                                        <span className={`status-pill tone-${dailyEmployeeReport.selectedDateAttendance === "Present" ? "emerald" : "red"}`}>
+                                            {dailyEmployeeReport.selectedDateAttendance}
+                                        </span>
+                                    ),
+                                },
+                                {
+                                    key: "previous",
+                                    label: formatDate(dailyEmployeeReport?.previousDate),
+                                    value: dailyEmployeeReport?.previousDateHouseCount || 0,
+                                    display: `${formatNumber(dailyEmployeeReport?.previousDateHouseCount || 0)} houses`,
+                                    tone: "slate",
+                                    badge: dailyEmployeeReport?.previousDateAttendance && (
+                                        <span className={`status-pill tone-${dailyEmployeeReport.previousDateAttendance === "Present" ? "emerald" : "red"}`}>
+                                            {dailyEmployeeReport.previousDateAttendance}
+                                        </span>
+                                    ),
+                                },
+                            ]}/>
+                        </div>
                     </div>
                     <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
                         <Card
@@ -1160,10 +1303,38 @@ export default function EmployeeApiDashboard({
                 )}
                 <section aria-labelledby="coverage-trend-heading" className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
                     <div>
-                        <h2 id="coverage-trend-heading" className="text-lg font-semibold text-slate-900">Coverage Trend</h2>
+                        <h2 id="coverage-trend-heading" className="section-heading text-lg font-semibold text-slate-900"><SectionIcon icon={TrendingUp} tone="teal"/>Coverage Trend</h2>
                         <p className="mt-1 max-w-3xl text-sm leading-5 text-slate-600">
                             See whether more or fewer houses were collected in this period than in the previous period of the same length. Coverage is the share of Beat houses scanned by you or another employee. A change of +5 percentage points means coverage went from, for example, 40% to 45%.
                         </p>
+                    </div>
+                    <div className="insight-panel mt-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                            <p className="insight-panel-title"><TrendingUp aria-hidden="true"/>Coverage</p>
+                            <DeltaBadge value={coverageTrend.changePercentagePoints}>
+                                {coverageTrend.changePercentagePoints == null
+                                    ? "Unavailable"
+                                    : `${coverageTrend.changePercentagePoints > 0 ? "+" : ""}${formatNumber(coverageTrend.changePercentagePoints, 1)} pp`}
+                            </DeltaBadge>
+                        </div>
+                        <div className="mt-3">
+                            <ComparisonBars max={100} rows={[
+                                {
+                                    key: "previous",
+                                    label: "Previous matching period",
+                                    value: coverageTrend.previousPercent,
+                                    display: coverageTrend.previousPercent == null ? "Unavailable" : `${formatNumber(coverageTrend.previousPercent, 1)}%`,
+                                    tone: "slate",
+                                },
+                                {
+                                    key: "selected",
+                                    label: "Selected period",
+                                    value: coverageTrend.currentPercent,
+                                    display: coverageTrend.currentPercent == null ? "Unavailable" : `${formatNumber(coverageTrend.currentPercent, 1)}%`,
+                                    tone: "teal",
+                                },
+                            ]}/>
+                        </div>
                     </div>
                     <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                         <Card
@@ -1214,44 +1385,73 @@ export default function EmployeeApiDashboard({
 
                 <section aria-labelledby="collection-pattern-heading" className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
                     <div>
-                        <h2 id="collection-pattern-heading" className="text-lg font-semibold text-slate-900">Collection Pattern</h2>
+                        <h2 id="collection-pattern-heading" className="section-heading text-lg font-semibold text-slate-900"><SectionIcon icon={Repeat} tone="violet"/>Collection Pattern</h2>
                         <p className="mt-1 max-w-3xl text-sm leading-5 text-slate-600">
                             These summaries use all available scan history through {formatDate(effectiveEndDate)}. Long gaps describe timing patterns only; they do not prove a house was deliberately skipped.
                         </p>
                     </div>
-                    <ul className="mt-3 grid gap-3 sm:grid-cols-2">
-                        <li className="rounded-lg border border-slate-200 p-3 text-sm text-slate-700">
-                            <span className="font-semibold text-slate-900">Scanned on multiple days: </span>
+                    <ul className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                        <PatternTile
+                            icon={Repeat}
+                            tone="emerald"
+                            title="Scanned on multiple days"
+                            value={formatNumber(collectionPatterns.repeatedlyCollected)}
+                            share={collectionPatterns.repeatedlyCollected}
+                            total={totalHouses}
+                        >
                             {formatNumber(collectionPatterns.repeatedlyCollected)} houses have scans recorded on more than one date.
-                        </li>
-                        <li className="rounded-lg border border-slate-200 p-3 text-sm text-slate-700">
-                            <span className="font-semibold text-slate-900">Scanned less often than typical: </span>
+                        </PatternTile>
+                        <PatternTile
+                            icon={TrendingUp}
+                            tone="amber"
+                            title="Scanned less often than typical"
+                            value={historicalHouseCoverage.typicalScanCount == null ? null : formatNumber(collectionPatterns.lowFrequency)}
+                            share={historicalHouseCoverage.typicalScanCount == null ? null : collectionPatterns.lowFrequency}
+                            total={totalHouses}
+                        >
                             {historicalHouseCoverage.typicalScanCount == null
                                 ? "There is not enough scan history to estimate a typical Beat baseline."
                                 : `${formatNumber(collectionPatterns.lowFrequency)} houses have fewer than half the typical ${formatNumber(historicalHouseCoverage.typicalScanCount, 1)} recorded scans per house.`}
-                        </li>
-                        <li className="rounded-lg border border-slate-200 p-3 text-sm text-slate-700">
-                            <span className="font-semibold text-slate-900">Repeated long gaps between scans: </span>
+                        </PatternTile>
+                        <PatternTile
+                            icon={Clock3}
+                            tone="violet"
+                            title="Repeated long gaps between scans"
+                            value={collectionPatterns.recordedHouseDays ? formatNumber(collectionPatterns.recurringLongGaps) : null}
+                            share={collectionPatterns.recordedHouseDays ? collectionPatterns.recurringLongGaps : null}
+                            total={totalHouses}
+                        >
                             {collectionPatterns.recordedHouseDays
                                 ? `${formatNumber(collectionPatterns.recurringLongGaps)} houses have at least two gaps longer than 1.5 times their own usual gap between scans.`
                                 : "There is not enough scan history to check for repeated gaps."}
-                        </li>
-                        <li className="rounded-lg border border-slate-200 p-3 text-sm text-slate-700">
-                            <span className="font-semibold text-slate-900">No scan in the available report: </span>
+                        </PatternTile>
+                        <PatternTile
+                            icon={CircleAlert}
+                            tone="red"
+                            title="No scan in the available report"
+                            value={formatNumber(collectionPatterns.noRecordedCollection)}
+                            share={collectionPatterns.noRecordedCollection}
+                            total={totalHouses}
+                        >
                             {formatNumber(collectionPatterns.noRecordedCollection)} houses have no ScanningDates entry in the report history. This does not establish that a house was never cleaned.
-                        </li>
-                        <li className="rounded-lg border border-slate-200 p-3 text-sm text-slate-700 sm:col-span-2">
-                            <span className="font-semibold text-slate-900">Month with the most recorded activity: </span>
+                        </PatternTile>
+                        <PatternTile
+                            icon={CalendarDays}
+                            tone="blue"
+                            title="Month with the most recorded activity"
+                            value={collectionPatterns.busiestMonth ? formatMonth(collectionPatterns.busiestMonth.month) : null}
+                            className="sm:col-span-2 xl:col-span-4"
+                        >
                             {collectionPatterns.busiestMonth
                                 ? `${formatMonth(collectionPatterns.busiestMonth.month)} had the most recorded house-days (${formatNumber(collectionPatterns.busiestMonth.houseDays)}). A house scanned on one date counts as one house-day.`
                                 : "Not enough historical periods are available to compare months."}
-                        </li>
+                        </PatternTile>
                     </ul>
                 </section>
 
                 <section aria-labelledby="anomaly-detection-heading" className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
                     <div>
-                        <h2 id="anomaly-detection-heading" className="text-lg font-semibold text-slate-900">
+                        <h2 id="anomaly-detection-heading" className="section-heading text-lg font-semibold text-slate-900"><SectionIcon icon={ShieldAlert} tone="red"/>
                             Anomaly Detection
                         </h2>
                         <p className="mt-1 max-w-3xl text-sm leading-5 text-slate-600">
@@ -1270,21 +1470,37 @@ export default function EmployeeApiDashboard({
                     )}
                     {anomalyResult && (
                         <>
+                            {anomalyResult.anomalies.length > 0 && (
+                                <div className="mt-3 flex flex-wrap gap-2" aria-hidden="true">
+                                    {["High", "Medium", "Low"].map((level) => {
+                                        const count = anomalyResult.anomalies.filter((anomaly) => anomaly.severity === level).length;
+                                        return (
+                                            <span key={level} className={`severity-chip tone-${SEVERITY_TONES[level]} ${count ? "" : "is-empty"}`}>
+                                                <TriangleAlert/>
+                                                {level}
+                                                <strong>{count}</strong>
+                                            </span>
+                                        );
+                                    })}
+                                </div>
+                            )}
                             {anomalyResult.anomalies.length === 0 && anomalyResult.insufficient_data.length === 0 && (
                                 <p className="mt-3 rounded border border-slate-200 bg-slate-50 p-3 text-sm font-medium text-slate-700">
                                     No significant anomalies detected.
                                 </p>
                             )}
                             {anomalyResult.insufficient_data.length > 0 && (
-                                <div className="mt-3 rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-                                    <p className="font-medium">Some checks could not be completed:</p>
-                                    <ul className="mt-1 list-inside list-disc">
-                                        {anomalyResult.insufficient_data.map((reason) => <li key={reason}>{reason}</li>)}
+                                <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50/70 p-4 text-sm text-amber-900">
+                                    <p className="flex items-center gap-2 font-semibold"><Info className="h-4 w-4" aria-hidden="true"/>Some checks could not be completed:</p>
+                                    <ul className="mt-2 grid gap-2">
+                                        {anomalyResult.insufficient_data.map((reason) => (
+                                            <li key={reason} className="rounded-lg bg-white/70 px-3 py-2 text-amber-950 shadow-[inset_0_0_0_1px_rgb(253_230_138)]">{reason}</li>
+                                        ))}
                                     </ul>
                                 </div>
                             )}
                             {anomalyResult.anomalies.length > 0 && (
-                                <div className="mt-3 overflow-auto rounded border border-slate-200">
+                                <div className="mt-3 overflow-auto rounded-xl border border-slate-200">
                                     <table className="w-full min-w-[900px] text-left text-sm">
                                         <thead className="bg-slate-50 text-xs font-semibold text-slate-600">
                                             <tr>
@@ -1297,18 +1513,17 @@ export default function EmployeeApiDashboard({
                                         </thead>
                                         <tbody>
                                             {anomalyResult.anomalies.map((anomaly) => (
-                                                <tr key={anomaly.type} className="border-t border-slate-100 align-top">
-                                                    <td className="p-3 font-medium text-slate-900">{anomaly.type}</td>
+                                                <tr key={anomaly.type} className={`anomaly-row tone-${SEVERITY_TONES[anomaly.severity] || "slate"} border-t border-slate-100 align-top`}>
+                                                    <td className="p-3 font-medium text-slate-900">
+                                                        <span className="flex items-start gap-2">
+                                                            <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-[var(--tone)]" aria-hidden="true"/>
+                                                            {anomaly.type}
+                                                        </span>
+                                                    </td>
                                                     <td className="p-3 text-slate-700">{anomaly.current_pattern}</td>
                                                     <td className="p-3 text-slate-700">{anomaly.normal_pattern}</td>
                                                     <td className="p-3">
-                                                        <span className={`inline-flex rounded-full px-2 py-1 text-xs font-semibold ${
-                                                            anomaly.severity === "High"
-                                                                ? "bg-red-100 text-red-800"
-                                                                : anomaly.severity === "Medium"
-                                                                    ? "bg-amber-100 text-amber-800"
-                                                                    : "bg-blue-100 text-blue-800"
-                                                        }`}>
+                                                        <span className={`status-pill tone-${SEVERITY_TONES[anomaly.severity] || "slate"}`}>
                                                             {anomaly.severity}
                                                         </span>
                                                     </td>

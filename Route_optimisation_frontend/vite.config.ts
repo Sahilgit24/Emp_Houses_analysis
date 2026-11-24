@@ -11,6 +11,17 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        // Split large libraries into their own cached files.
+        manualChunks: {
+          react: ["react", "react-dom"],
+          leaflet: ["leaflet", "react-leaflet"],
+        },
+      },
+    },
+  },
   server: {
     host: true,          // or '0.0.0.0'
     port: 3000,

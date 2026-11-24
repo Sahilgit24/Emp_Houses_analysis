@@ -1,4 +1,6 @@
 import {useMemo} from "react";
+import {BellRing, MapPinned} from "lucide-react";
+import {Avatar, HeroIcon, SectionIcon} from "./common/Decor.jsx";
 import {findOutsideBeatCollectionAlerts} from "../data/employeeAlerts.js";
 
 const LIVE_DATE = "live";
@@ -29,8 +31,9 @@ export default function EmployeeAlerts({
     return (
         <div className="h-full overflow-y-auto bg-slate-50 p-4 sm:p-6">
             <div className="mx-auto flex w-full max-w-7xl flex-col gap-5">
-                <header className="flex flex-wrap items-end justify-between gap-4">
-                    <div>
+                <header className="page-hero page-hero-amber page-hero-row">
+                    <HeroIcon icon={BellRing} tone="amber"/>
+                    <div className="page-hero-text">
                         <p className="text-sm font-semibold text-amber-700">Collection monitoring</p>
                         <h1 className="mt-1 text-2xl font-bold text-slate-900">Employee Alerts</h1>
                         <p className="mt-1 text-sm text-slate-600">
@@ -42,14 +45,15 @@ export default function EmployeeAlerts({
                 <section aria-labelledby="outside-beat-alerts-heading" className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
                     <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 p-4">
                         <div>
-                            <h2 id="outside-beat-alerts-heading" className="font-semibold text-slate-900">
+                            <h2 id="outside-beat-alerts-heading" className="section-heading font-semibold text-slate-900">
+                                <SectionIcon icon={MapPinned} tone="amber"/>
                                 Outside-Beat collections
                             </h2>
                             <p className="mt-1 text-xs text-slate-500">
                                 {periodLabel || "Select a ULB above to load collection alerts."}
                             </p>
                         </div>
-                        <span className="rounded-full bg-amber-50 px-3 py-1 text-sm font-semibold text-amber-900">
+                        <span className="status-pill tone-amber text-sm">
                             {alerts.length.toLocaleString()} alert{alerts.length === 1 ? "" : "s"}
                         </span>
                     </div>
@@ -70,8 +74,10 @@ export default function EmployeeAlerts({
                                     {alerts.map((alert) => (
                                         <tr key={alert.id} className="border-t border-slate-100">
                                             <td className="p-3 text-slate-700">{alert.date}</td>
-                                            <td className="p-3 font-semibold text-slate-900">{alert.houseId}</td>
-                                            <td className="p-3 text-slate-700">{alert.employeeName} ({alert.employeeId})</td>
+                                            <td className="p-3 font-semibold text-slate-900"><span className="id-chip">{alert.houseId}</span></td>
+                                            <td className="p-3 text-slate-700">
+                                                <span className="person-cell"><Avatar name={alert.employeeName}/>{alert.employeeName} ({alert.employeeId})</span>
+                                            </td>
                                             <td className="p-3 text-slate-700">{alert.employeeUlbName}</td>
                                             <td className="p-3 text-slate-700">{alert.ulbName}</td>
                                             <td className="p-3 text-slate-700">{alert.beatName}</td>

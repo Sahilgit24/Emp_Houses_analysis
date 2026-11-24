@@ -12,6 +12,21 @@ import {
     DialogHeader,
     DialogTitle,
 } from "../components/ui/dialog";
+import {
+    Activity,
+    Building2,
+    CircleDashed,
+    Filter,
+    Globe2,
+    Home,
+    LayoutDashboard,
+    PieChart,
+    Target,
+    UserCheck,
+    UserX,
+} from "lucide-react";
+import {Avatar, HeroIcon, MiniBar, SectionIcon, StatIcon} from "./common/Decor.jsx";
+import {toneFromTextClass} from "./common/decorTones.js";
 
 function OverviewFilter({label, children}) {
     return (
@@ -34,13 +49,20 @@ function RingCoverage({percent, collected, total}) {
         <div className="flex flex-col items-center gap-3">
             <svg viewBox="0 0 120 120" className="h-48 w-48" role="img"
                 aria-label={percent == null ? "Collection coverage unavailable" : `${percent.toFixed(1)} percent collection coverage`}>
+                <defs>
+                    <linearGradient id="coverage-ring-gradient" x1="0" y1="0" x2="1" y2="1">
+                        <stop offset="0%" stopColor="#34d399"/>
+                        <stop offset="100%" stopColor="#059669"/>
+                    </linearGradient>
+                </defs>
                 <circle cx="60" cy="60" r={radius} fill="none" stroke="#e2e8f0" strokeWidth="12"/>
+                <circle cx="60" cy="60" r="31" fill="#f0fdf4"/>
                 <circle
                     cx="60"
                     cy="60"
                     r={radius}
                     fill="none"
-                    stroke="#16a34a"
+                    stroke="url(#coverage-ring-gradient)"
                     strokeWidth="12"
                     strokeLinecap="round"
                     strokeDasharray={`${circumference * value / 100} ${circumference}`}
@@ -60,17 +82,167 @@ function RingCoverage({percent, collected, total}) {
     );
 }
 
-function EmployeeStatusCard({label, value, detail, tone, onClick}) {
+function CollectionPattern({
+    summary,
+    selectedDate,
+    viewMode,
+    selectedRangeLabel,
+    reportStatus,
+    showUlbColumn,
+}) {
+    const [selectedCategory, setSelectedCategory] = useState(null);
+    const categoryDescriptions = {
+        inside: "The latest recorded scan through this date matches the employee assigned to this house's Beat.",
+        outside: "The latest recorded scan through this date is attributed to an employee assigned to another Beat.",
+        other: "The latest recorded scan is attributed to another or unidentified scanner, or cannot be verified against an assigned Beat.",
+        never: "No scan appears in the collection history returned by the loaded reports through this date. This does not prove the house was never scanned.",
+    };
+    const selectedPattern = summary.collectionPattern.find(
+        (item) => item.key === selectedCategory,
+    );
+    const listDate = viewMode === "average" ? selectedRangeLabel.split(" to ").at(-1) : selectedDate;
+    const listTitle = selectedPattern
+        ? `${selectedPattern.label} · ${selectedPattern.houses.length.toLocaleString()} houses`
+        : "";
+
+    return (
+        <>
+            <article aria-labelledby="collection-pattern-heading" className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div>
+                        <h2 id="collection-pattern-heading" className="section-heading font-semibold text-slate-900"><SectionIcon icon={PieChart} tone="violet"/>Collection Pattern</h2>
+                        <p className="mt-1 text-sm text-slate-500">
+                            {viewMode === "average"
+                                ? `Average daily share by latest collection status over ${selectedRangeLabel}.`
+                                : `Share of houses by their latest recorded collection status through ${selectedDate || "the latest available date"}.`}
+                        </p>
+                    </div>
+                    <p className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold tabular-nums text-slate-700">
+                        {summary.totalHouses.toLocaleString()} houses
+                    </p>
+                </div>
+                <div
+                    className="mt-5 flex h-5 overflow-hidden rounded-full bg-slate-100"
+                    role="group"
+                    aria-label={summary.collectionPattern.map((item) =>
+                        `${item.label}: ${item.count.toLocaleString(undefined, {maximumFractionDigits: 1})} houses, ${item.percent.toFixed(1)}%`
+                    ).join(", ")}
+                >
+                    {summary.collectionPattern.map((item) => (
+                        <button
+                            key={item.key}
+                            type="button"
+                            onClick={() => item.houses.length && setSelectedCategory(item.key)}
+                            disabled={!item.houses.length}
+                            aria-label={`View ${item.label}: ${item.count.toLocaleString(undefined, {maximumFractionDigits: 1})} houses, ${item.percent.toFixed(1)} percent`}
+                            title={`${item.label}: ${item.count.toLocaleString(undefined, {maximumFractionDigits: 1})} houses (${item.percent.toFixed(1)}%). ${categoryDescriptions[item.key]}`}
+                            className="h-full min-w-0 border-0 p-0 disabled:cursor-default"
+                            style={{width: `${item.percent}%`, backgroundColor: item.color}}
+                        />
+                    ))}
+                </div>
+                <div className="mt-5 grid gap-1 sm:grid-cols-2">
+                    {summary.collectionPattern.map((item) => (
+                        <button
+                            key={item.key}
+                            type="button"
+                            disabled={!item.houses.length}
+                            onClick={() => setSelectedCategory(item.key)}
+                            title={categoryDescriptions[item.key]}
+                            className="flex min-w-0 items-start gap-2 rounded-md p-2 text-left transition hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-blue-600 disabled:cursor-default disabled:hover:bg-transparent"
+                        >
+                            <span className="mt-1 inline-block h-3 w-3 shrink-0 rounded-sm" style={{backgroundColor: item.color}}/>
+                            <span className="min-w-0 flex-1">
+                                <span className="block text-sm font-medium text-slate-700">{item.label}</span>
+                                <span className="block text-xs tabular-nums text-slate-500">
+                                    {item.count.toLocaleString(undefined, {maximumFractionDigits: 1})} houses · {item.percent.toFixed(1)}%
+                                    {viewMode === "average" ? " · avg/day" : ""}
+                                </span>
+                            </span>
+                        </button>
+                    ))}
+                </div>
+                <div className={`mt-4 rounded-lg border px-3 py-2 text-xs ${
+                    reportStatus.incomplete
+                        ? "border-amber-200 bg-amber-50 text-amber-900"
+                        : "border-emerald-100 bg-emerald-50 text-emerald-800"
+                }`}>
+                    <p className="font-semibold">{reportStatus.label}</p>
+                    <p className="mt-0.5">{reportStatus.detail}</p>
+                </div>
+                {!summary.totalHouses && (
+                    <p role="status" className="mt-4 rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                        No house records are available to calculate this pattern.
+                    </p>
+                )}
+            </article>
+            <Dialog
+                open={Boolean(selectedPattern)}
+                onOpenChange={(open) => {
+                    if (!open) setSelectedCategory(null);
+                }}
+            >
+                <DialogContent className="flex max-h-[85vh] flex-col overflow-hidden sm:max-w-4xl">
+                    <DialogHeader className="shrink-0 pr-8">
+                        <DialogTitle>{listTitle}</DialogTitle>
+                        <DialogDescription>
+                            {categoryDescriptions[selectedCategory]}
+                            {viewMode === "average"
+                                ? ` The list shows house status on the range end date (${listDate}); the displayed count is the daily average.`
+                                : ` Status is through ${listDate || "the latest available date"}.`}
+                        </DialogDescription>
+                    </DialogHeader>
+                    <div className="min-h-0 flex-1 overflow-auto rounded-lg border border-slate-200">
+                        <table className="w-full min-w-[700px] text-left text-sm">
+                            <thead className="sticky top-0 bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                <tr>
+                                    <th scope="col" className="p-3">House ID</th>
+                                    {showUlbColumn && <th scope="col" className="p-3">ULB</th>}
+                                    <th scope="col" className="p-3">Beat</th>
+                                    <th scope="col" className="p-3">Latest scan</th>
+                                    <th scope="col" className="p-3">Scanner</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {selectedPattern?.houses.map((house) => (
+                                    <tr key={`${house.ulbId}:${house.beatName}:${house.houseId}`} className="border-t border-slate-100">
+                                        <th scope="row" className="p-3 font-medium text-slate-800">{house.houseId}</th>
+                                        {showUlbColumn && <td className="p-3 text-slate-600">{house.ulbName}</td>}
+                                        <td className="p-3 text-slate-600">{house.beatName}</td>
+                                        <td className="p-3 text-slate-600">{house.scannedDate || "No recorded scan"}</td>
+                                        <td className="p-3 text-slate-600">
+                                            {house.scannerName || house.scannerId || "Unidentified"}
+                                        </td>
+                                    </tr>
+                                ))}
+                                {!selectedPattern?.houses.length && (
+                                    <tr><td colSpan={showUlbColumn ? 5 : 4} className="p-6 text-center text-slate-500">No houses in this category.</td></tr>
+                                )}
+                            </tbody>
+                        </table>
+                    </div>
+                </DialogContent>
+            </Dialog>
+        </>
+    );
+}
+
+function EmployeeStatusCard({label, value, detail, tone, onClick, icon, total}) {
+    const accent = toneFromTextClass(tone);
     const content = (
         <>
-            <p className="text-sm font-medium text-slate-600">{label}</p>
-            <p className={`mt-2 text-3xl font-bold tabular-nums ${tone}`}>
+            <div className="stat-card-head">
+                <p className="text-sm font-medium text-slate-600">{label}</p>
+                {icon && <StatIcon icon={icon} tone={accent}/>}
+            </div>
+            <p className={`text-3xl font-bold tabular-nums ${tone}`}>
                 {value.toLocaleString(undefined, {maximumFractionDigits: 1})}
             </p>
             <p className="mt-1 text-xs text-slate-500">{detail}</p>
+            <MiniBar value={value} total={total} tone={accent}/>
         </>
     );
-    const cardClassName = "rounded-xl border border-slate-200 bg-white p-4 shadow-sm";
+    const cardClassName = `stat-card tone-${accent} rounded-xl border border-slate-200 bg-white p-4 shadow-sm`;
     if (!onClick) return <article className={cardClassName}>{content}</article>;
 
     return (
@@ -238,6 +410,56 @@ export default function ExecutiveOverview({
     const inactiveUlbsCount = allUlbActivity.filter((row) => row.status === "Inactive").length;
     const incompleteUlbsCount = allUlbActivity.length - activeUlbsCount - inactiveUlbsCount;
     const hasIncompleteData = ulbEmployeeErrors.length > 0 || reportErrors.length > 0 || missingReportsCount > 0;
+    const reportScopeUlbIds = selectedUlbId === "all"
+        ? ulbs.map((ulb) => String(ulb.id))
+        : [String(selectedUlbId)];
+    const expectedReportCount = reportScopeUlbIds.reduce(
+        (total, ulbId) => total + (employeeListsByUlb[ulbId]?.employees.length || 0),
+        0,
+    );
+    const loadedReportCount = reportScopeUlbIds.reduce(
+        (total, ulbId) => total + (loadedEmployeeIdsByUlb.get(ulbId)?.size || 0),
+        0,
+    );
+    const scopedReportErrors = reportErrors.filter((error) =>
+        selectedUlbId === "all" || !error.ulbId || String(error.ulbId) === String(selectedUlbId)
+    );
+    const scopedUlbErrors = ulbEmployeeErrors.filter(({ulb}) =>
+        selectedUlbId === "all" || String(ulb.id) === String(selectedUlbId)
+    );
+    const missingEmployeeLists = reportScopeUlbIds.filter((ulbId) =>
+        !employeeListsByUlb[ulbId] &&
+        !scopedUlbErrors.some(({ulb}) => String(ulb.id) === ulbId)
+    ).length;
+    const missingReportCount = Math.max(
+        0,
+        expectedReportCount - loadedReportCount - scopedReportErrors.length,
+    );
+    const reportStatus = isLoading
+        ? {
+            label: expectedReportCount
+                ? `Loading reports · ${loadedReportCount.toLocaleString()} of ${expectedReportCount.toLocaleString()} received`
+                : "Loading employee lists and reports",
+            detail: `${missingEmployeeLists.toLocaleString()} ULB employee list${missingEmployeeLists === 1 ? "" : "s"} still loading.`,
+            incomplete: true,
+        }
+        : scopedReportErrors.length || scopedUlbErrors.length || missingReportCount || missingEmployeeLists
+            ? {
+                label: "Partial report data",
+                detail: `${loadedReportCount.toLocaleString()} of ${expectedReportCount.toLocaleString()} employee reports loaded · ${scopedReportErrors.length.toLocaleString()} failed · ${scopedUlbErrors.length.toLocaleString()} ULB employee list${scopedUlbErrors.length === 1 ? "" : "s"} failed.`,
+                incomplete: true,
+            }
+            : expectedReportCount
+                ? {
+                    label: `All ${loadedReportCount.toLocaleString()} employee reports loaded`,
+                    detail: "Pattern totals include the loaded reports in the current ULB scope.",
+                    incomplete: false,
+                }
+                : {
+                    label: "No employee reports available",
+                    detail: "Select a ULB or wait for its employee list to load.",
+                    incomplete: true,
+                };
     const statusEmployees = employeeStatusDialog === "active"
         ? summary.activeEmployeeList
         : summary.inactiveEmployeeList;
@@ -252,7 +474,9 @@ export default function ExecutiveOverview({
         return (
             <div className="h-full overflow-y-auto bg-slate-50 p-4 sm:p-6">
                 <div className="mx-auto flex w-full max-w-7xl flex-col gap-5">
-                    <header>
+                    <header className="page-hero page-hero-teal page-hero-row">
+                        <HeroIcon icon={Globe2} tone="teal"/>
+                        <div className="page-hero-text">
                         <p className="text-sm font-semibold text-blue-700">Live monitoring · {liveDate} IST</p>
                         <h1 className="mt-1 text-2xl font-bold text-slate-900">All ULBs</h1>
                         <p className="mt-1 text-sm text-slate-600">
@@ -261,6 +485,7 @@ export default function ExecutiveOverview({
                         <p className="mt-1 text-xs text-slate-500">
                             Live totals are calculated from each listed employee report; loading across all ULBs can take time.
                         </p>
+                        </div>
                     </header>
                     {hasIncompleteData && !isLoading && (
                         <p role="status" className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
@@ -271,24 +496,28 @@ export default function ExecutiveOverview({
                     <section aria-label="All-ULB live totals" className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
                         <EmployeeStatusCard
                             label="Active ULBs today"
+                            icon={Building2} total={activeUlbsCount + inactiveUlbsCount + incompleteUlbsCount}
                             value={activeUlbsCount}
                             detail="At least one employee has GPS and house records today"
                             tone="text-emerald-700"
                         />
                         <EmployeeStatusCard
                             label="Inactive ULBs today"
+                            icon={Building2} total={activeUlbsCount + inactiveUlbsCount + incompleteUlbsCount}
                             value={inactiveUlbsCount}
                             detail="All listed employee reports loaded; no qualifying activity today"
                             tone="text-amber-700"
                         />
                         <EmployeeStatusCard
                             label="ULBs pending / incomplete"
+                            icon={CircleDashed} total={activeUlbsCount + inactiveUlbsCount + incompleteUlbsCount}
                             value={incompleteUlbsCount}
                             detail="Loading, partial, unavailable, or no employee records"
                             tone="text-slate-700"
                         />
                         <EmployeeStatusCard
                             label="Active employees today"
+                            icon={UserCheck} total={summary.totalEmployees}
                             value={summary.activeEmployees}
                             detail={`${summary.totalEmployees.toLocaleString()} employees with successful reports`}
                             tone="text-emerald-700"
@@ -296,6 +525,7 @@ export default function ExecutiveOverview({
                         />
                         <EmployeeStatusCard
                             label="Inactive employees today"
+                            icon={UserX} total={summary.totalEmployees}
                             value={summary.inactiveEmployees}
                             detail="No qualifying GPS and house activity in loaded reports"
                             tone="text-amber-700"
@@ -303,6 +533,7 @@ export default function ExecutiveOverview({
                         />
                         <EmployeeStatusCard
                             label="Houses in loaded reports"
+                            icon={Home}
                             value={summary.totalHouses}
                             detail={`${summary.collectedHouses.toLocaleString()} collected through today`}
                             tone="text-slate-900"
@@ -311,7 +542,7 @@ export default function ExecutiveOverview({
 
                     <section aria-labelledby="all-ulb-coverage-heading" className="grid gap-4 lg:grid-cols-[minmax(260px,0.8fr)_minmax(0,1.2fr)]">
                         <article className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
-                            <h2 id="all-ulb-coverage-heading" className="font-semibold text-slate-900">Live Coverage</h2>
+                            <h2 id="all-ulb-coverage-heading" className="section-heading font-semibold text-slate-900"><SectionIcon icon={Target} tone="emerald"/>Live Coverage</h2>
                             <p className="mt-1 text-sm text-slate-500">
                                 Collection status through {liveDate}; based on loaded reports.
                             </p>
@@ -323,50 +554,19 @@ export default function ExecutiveOverview({
                                 />
                             </div>
                         </article>
-                        <article aria-labelledby="all-ulb-pattern-heading" className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
-                            <h2 id="all-ulb-pattern-heading" className="font-semibold text-slate-900">Collection Pattern</h2>
-                            <p className="mt-1 text-sm text-slate-500">
-                                Share of houses by latest recorded collection status through today.
-                            </p>
-                            <div
-                                className="mt-5 flex h-5 overflow-hidden rounded-full bg-slate-100"
-                                role="img"
-                                aria-label={summary.collectionPattern.map((item) =>
-                                    `${item.label}: ${item.percent.toFixed(1)}%`
-                                ).join(", ")}
-                            >
-                                {summary.collectionPattern.map((item) => (
-                                    <span
-                                        key={item.key}
-                                        title={`${item.label}: ${item.count.toLocaleString()} (${item.percent.toFixed(1)}%)`}
-                                        style={{width: `${item.percent}%`, backgroundColor: item.color}}
-                                    />
-                                ))}
-                            </div>
-                            <div className="mt-5 grid gap-3 sm:grid-cols-2">
-                                {summary.collectionPattern.map((item) => (
-                                    <div key={item.key} className="flex items-start gap-2">
-                                        <span className="mt-1 inline-block h-3 w-3 shrink-0 rounded-sm" style={{backgroundColor: item.color}}/>
-                                        <div className="min-w-0 flex-1">
-                                            <p className="text-sm font-medium text-slate-700">{item.label}</p>
-                                            <p className="text-xs text-slate-500">
-                                                {item.count.toLocaleString()} houses · {item.percent.toFixed(1)}%
-                                            </p>
-                                        </div>
-                                    </div>
-                                ))}
-                            </div>
-                            {!summary.totalHouses && !isLoading && (
-                                <p role="status" className="mt-5 rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-                                    No house records were returned for the loaded employee reports.
-                                </p>
-                            )}
-                        </article>
+                        <CollectionPattern
+                            summary={summary}
+                            selectedDate={liveDate}
+                            viewMode="latest"
+                            selectedRangeLabel=""
+                            reportStatus={reportStatus}
+                            showUlbColumn
+                        />
                     </section>
 
                     <section aria-labelledby="ulb-activity-heading" className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
                         <div className="p-4 sm:p-5">
-                            <h2 id="ulb-activity-heading" className="font-semibold text-slate-900">ULB Activity Today</h2>
+                            <h2 id="ulb-activity-heading" className="section-heading font-semibold text-slate-900"><SectionIcon icon={Building2} tone="blue"/>ULB Activity Today</h2>
                             <p className="mt-1 text-sm text-slate-500">
                                 Active means at least one reported employee has GPS route points dated today and house records in the report.
                             </p>
@@ -390,7 +590,9 @@ export default function ExecutiveOverview({
                                                 : "bg-amber-100 text-amber-800";
                                         return (
                                             <tr key={ulb.id}>
-                                                <th scope="row" className="px-4 py-3 font-medium text-slate-800">{ulb.name}</th>
+                                                <th scope="row" className="px-4 py-3 font-medium text-slate-800">
+                                                    <span className="person-cell"><Avatar name={ulb.name}/>{ulb.name}</span>
+                                                </th>
                                                 <td className="px-4 py-3 tabular-nums text-slate-600">{ulb.employeeCount.toLocaleString()}</td>
                                                 <td className="px-4 py-3 tabular-nums text-slate-600">{ulb.activeCount.toLocaleString()}</td>
                                                 <td className="px-4 py-3">
@@ -460,7 +662,9 @@ export default function ExecutiveOverview({
     return (
         <div className="h-full overflow-y-auto bg-slate-50 p-4 sm:p-6">
             <div className="mx-auto flex w-full max-w-7xl flex-col gap-5">
-                <header>
+                <header className="page-hero page-hero-row">
+                    <HeroIcon icon={LayoutDashboard} tone="blue"/>
+                    <div className="page-hero-text">
                     <p className="text-sm font-semibold text-blue-700">
                         {viewMode === "average" ? "Daily average" : "Monitoring"} · {summary.ulbName}
                     </p>
@@ -468,14 +672,15 @@ export default function ExecutiveOverview({
                     <p className="mt-1 text-sm text-slate-600">
                         Employee activity and collection coverage for {summary.employeeName}.
                     </p>
+                    </div>
                 </header>
 
-                <section aria-labelledby="overview-filters-heading" className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
-                    <div className="mb-4">
-                        <h2 id="overview-filters-heading" className="font-semibold text-slate-900">Employee filter</h2>
+                <section aria-labelledby="overview-filters-heading" className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5 lg:flex lg:items-end lg:justify-between lg:gap-8">
+                    <div className="mb-4 lg:mb-1 lg:max-w-xs lg:shrink-0">
+                        <h2 id="overview-filters-heading" className="section-heading font-semibold text-slate-900"><SectionIcon icon={Filter} tone="blue"/>Employee filter</h2>
                         <p className="mt-1 text-xs text-slate-500">Choose an employee. State, ULB, date, and range are shared across tabs.</p>
                     </div>
-                    <div className="flex flex-wrap items-end gap-3">
+                    <div className="flex flex-wrap items-end gap-3 lg:max-w-3xl lg:flex-1">
                         <OverviewFilter label="Employee">
                             <select
                                 value={employeeSelection}
@@ -510,7 +715,7 @@ export default function ExecutiveOverview({
 
                 <section aria-labelledby="employee-activity-heading">
                     <div className="mb-3">
-                        <h2 id="employee-activity-heading" className="font-semibold text-slate-900">Employee Activity</h2>
+                        <h2 id="employee-activity-heading" className="section-heading font-semibold text-slate-900"><SectionIcon icon={Activity} tone="blue"/>Employee Activity</h2>
                         <p className="mt-1 text-sm text-slate-500">
                             {viewMode === "average"
                                 ? `Daily average across ${summary.averageDays} calendar days (${selectedRangeLabel}). An employee is active on a day when GPS route points and at least one scanned or unscanned house are recorded.`
@@ -520,6 +725,7 @@ export default function ExecutiveOverview({
                     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
                         <EmployeeStatusCard
                             label="Active employees"
+                            icon={UserCheck} total={summary.totalEmployees}
                             value={summary.activeEmployees}
                             detail={`${viewMode === "average" ? "Average per day · " : ""}${summary.totalEmployees.toLocaleString()} employees in scope`}
                             tone="text-emerald-700"
@@ -527,6 +733,7 @@ export default function ExecutiveOverview({
                         />
                         <EmployeeStatusCard
                             label="Inactive employees"
+                            icon={UserX} total={summary.totalEmployees}
                             value={summary.inactiveEmployees}
                             detail={viewMode === "average" ? "Average inactive employees per day" : "No GPS route or house records on the date"}
                             tone="text-amber-700"
@@ -534,6 +741,7 @@ export default function ExecutiveOverview({
                         />
                         <EmployeeStatusCard
                             label="Houses in scope"
+                            icon={Home}
                             value={summary.totalHouses}
                             detail={summary.ulbName}
                             tone="text-slate-900"
@@ -543,7 +751,8 @@ export default function ExecutiveOverview({
 
                 <section className="grid gap-4 lg:grid-cols-[minmax(260px,0.8fr)_minmax(0,1.2fr)]">
                     <article aria-labelledby="live-coverage-heading" className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
-                        <h2 id="live-coverage-heading" className="font-semibold text-slate-900">
+                        <h2 id="live-coverage-heading" className="section-heading font-semibold text-slate-900">
+                            <SectionIcon icon={Target} tone="emerald"/>
                             {viewMode === "average" ? "Average Coverage" : "Coverage"}
                         </h2>
                         <p className="mt-1 text-sm text-slate-500">
@@ -560,47 +769,14 @@ export default function ExecutiveOverview({
                         </div>
                     </article>
 
-                    <article aria-labelledby="collection-pattern-heading" className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
-                        <h2 id="collection-pattern-heading" className="font-semibold text-slate-900">Collection Pattern</h2>
-                        <p className="mt-1 text-sm text-slate-500">
-                            {viewMode === "average"
-                                ? `Average daily share by latest collection status over ${selectedRangeLabel}.`
-                                : `Share of houses by their latest recorded collection status through ${selectedDate || "the latest available date"}.`}
-                        </p>
-                        <div
-                            className="mt-5 flex h-5 overflow-hidden rounded-full bg-slate-100"
-                            role="img"
-                            aria-label={summary.collectionPattern.map((item) =>
-                                `${item.label}: ${item.percent.toFixed(1)}%`
-                            ).join(", ")}
-                        >
-                            {summary.collectionPattern.map((item) => (
-                                <span
-                                    key={item.key}
-                                    title={`${item.label}: ${item.count.toLocaleString()} (${item.percent.toFixed(1)}%)`}
-                                    style={{width: `${item.percent}%`, backgroundColor: item.color}}
-                                />
-                            ))}
-                        </div>
-                        <div className="mt-5 grid gap-3 sm:grid-cols-2">
-                            {summary.collectionPattern.map((item) => (
-                                <div key={item.key} className="flex items-start gap-2">
-                                    <span className="mt-1 inline-block h-3 w-3 shrink-0 rounded-sm" style={{backgroundColor: item.color}}/>
-                                    <div className="min-w-0 flex-1">
-                                        <p className="text-sm font-medium text-slate-700">{item.label}</p>
-                                        <p className="text-xs text-slate-500">
-                                            {item.count.toLocaleString(undefined, {maximumFractionDigits: 1})} houses · {item.percent.toFixed(1)}%
-                                        </p>
-                                    </div>
-                                </div>
-                            ))}
-                        </div>
-                        {!summary.totalHouses && (
-                            <p role="status" className="mt-5 rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-                                Select a ULB above to load employee reports and calculate collection coverage and patterns.
-                            </p>
-                        )}
-                    </article>
+                    <CollectionPattern
+                        summary={summary}
+                        selectedDate={selectedDate}
+                        viewMode={viewMode}
+                        selectedRangeLabel={selectedRangeLabel}
+                        reportStatus={reportStatus}
+                        showUlbColumn={false}
+                    />
                 </section>
 
                 <p className="text-xs text-slate-500">

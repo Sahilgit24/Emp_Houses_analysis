@@ -10,12 +10,40 @@ export const WEIGHT_API_ENDPOINTS = {
 const REPORT_CONCURRENCY = 4;
 const ULB_CONCURRENCY = 4;
 
-async function getJson(url, headers = {}, signal, fetcher = globalThis.fetch) {
-    const response = await fetcher(url, {method: "GET", headers, signal});
+// Short-lived in-memory cache of raw API payloads, so switching back to a recently loaded ULB
+// does not re-download every report. Payloads are cloned on read and normalized again by the
+// callers, so cached and fresh loads produce identical data. Refresh buttons clear the cache.
+export const RESPONSE_CACHE_TTL_MS = 5 * 60 * 1000;
+const RESPONSE_CACHE_MAX_ENTRIES = 300;
+const responseCache = new Map();
+
+export function clearWeightApiCache() {
+    responseCache.clear();
+}
+
+async function getJson(url, headers = {}, signal, fetcher) {
+    // Only the app's own network fetches are cached; an injected fetcher (tests) always runs.
+    const cacheKey = fetcher ? null : `${url}|${JSON.stringify(headers)}`;
+    if (cacheKey) {
+        const cached = responseCache.get(cacheKey);
+        if (cached && Date.now() - cached.storedAt < RESPONSE_CACHE_TTL_MS) {
+            return structuredClone(cached.payload);
+        }
+        responseCache.delete(cacheKey);
+    }
+    const response = await (fetcher || globalThis.fetch)(url, {method: "GET", headers, signal});
     if (!response.ok) {
         throw new Error(`Request failed (HTTP ${response.status}).`);
     }
-    return response.json();
+    const payload = await response.json();
+    if (cacheKey) {
+        responseCache.set(cacheKey, {payload: structuredClone(payload), storedAt: Date.now()});
+        // Map keeps insertion order, so the first keys are the oldest entries.
+        while (responseCache.size > RESPONSE_CACHE_MAX_ENTRIES) {
+            responseCache.delete(responseCache.keys().next().value);
+        }
+    }
+    return payload;
 }
 
 export async function fetchUlbDirectory({signal, fetcher} = {}) {

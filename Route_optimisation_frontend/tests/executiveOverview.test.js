@@ -87,6 +87,16 @@ test("summarizes selected ULB activity and the four collection categories throug
         {key: "other", count: 1, percent: 25},
         {key: "never", count: 1, percent: 25},
     ]);
+    assert.deepEqual(
+        summary.collectionPattern.map(({key, houses}) => [key, houses.map(({houseId}) => houseId)]),
+        [
+            ["inside", ["inside"]],
+            ["outside", ["outside"]],
+            ["other", ["other"]],
+            ["never", ["never"]],
+        ],
+    );
+    assert.equal(summary.collectionPattern.find(({key}) => key === "never").label, "No scan recorded");
 });
 
 test("all-ULB summary combines sources while dates before scanning show uncollected houses", () => {

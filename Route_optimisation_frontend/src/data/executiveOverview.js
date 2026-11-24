@@ -104,6 +104,7 @@ export function summarizeExecutiveOverview(
         (source.data.beats || []).map((beat) => ({
             beat,
             ulbId: String(source.ulbId || ""),
+            source,
         }))
     );
     const beats = selectedEmployee
@@ -126,7 +127,9 @@ export function summarizeExecutiveOverview(
             ]),
     );
     const counts = {inside: 0, outside: 0, other: 0, never: 0};
+    const housesByPattern = {inside: [], outside: [], other: [], never: []};
     let totalHouses = 0;
+    const ulbNameById = new Map(ulbs.map((ulb) => [String(ulb.id), ulb.name]));
 
     allBeats.forEach(({beat, ulbId}) => {
         const ownerId = String(beat.assignedEmployee?.id || "");
@@ -156,7 +159,7 @@ export function summarizeExecutiveOverview(
         }
     });
 
-    beats.forEach(({beat, ulbId}) => {
+    beats.forEach(({beat, ulbId, source}) => {
         const ownerId = String(beat.assignedEmployee?.id || "");
         (beat.houses || []).forEach((house) => {
             totalHouses += 1;
@@ -167,26 +170,38 @@ export function summarizeExecutiveOverview(
                     (Date.parse(a.timestamp) || 0) - (Date.parse(b.timestamp) || 0)
                 );
             const latestEvent = relevantEvents.at(-1);
+            let category;
             if (!latestEvent) {
                 counts.never += 1;
-                return;
+                category = "never";
+            } else {
+                const scannerId = String(latestEvent.scannerUserId || "");
+                if (scannerId && scannerId === ownerId) {
+                    counts.inside += 1;
+                    category = "inside";
+                } else {
+                    const scannerAssignments = assignedBeatsByEmployee.get(scannerId) || [];
+                    if (scannerId && scannerAssignments.length &&
+                        scannerAssignments.some((assignment) =>
+                            assignment.key !== beatKey(ulbId, beat.id)
+                        )) {
+                        counts.outside += 1;
+                        category = "outside";
+                    } else {
+                        counts.other += 1;
+                        category = "other";
+                    }
+                }
             }
-
-            const scannerId = String(latestEvent.scannerUserId || "");
-            if (scannerId && scannerId === ownerId) {
-                counts.inside += 1;
-                return;
-            }
-
-            const scannerAssignments = assignedBeatsByEmployee.get(scannerId) || [];
-            if (scannerId && scannerAssignments.length &&
-                scannerAssignments.some((assignment) =>
-                    assignment.key !== beatKey(ulbId, beat.id)
-                )) {
-                counts.outside += 1;
-                return;
-            }
-            counts.other += 1;
+            housesByPattern[category].push({
+                houseId: String(house.houseId || "Unknown house"),
+                ulbId,
+                ulbName: source?.ulbName || ulbNameById.get(ulbId) || ulbId,
+                beatName: beat.beatName || `Beat ${beat.id}`,
+                scannerId: latestEvent?.scannerUserId ? String(latestEvent.scannerUserId) : "",
+                scannerName: latestEvent?.scannerName || "",
+                scannedDate: latestEvent?.date || "",
+            });
         });
     });
 
@@ -211,10 +226,11 @@ export function summarizeExecutiveOverview(
         {key: "inside", label: "Collected inside assigned Beat", count: counts.inside, color: "#16a34a"},
         {key: "outside", label: "Collected outside assigned Beat", count: counts.outside, color: "#f97316"},
         {key: "other", label: "Collected by other / unverified", count: counts.other, color: "#2563eb"},
-        {key: "never", label: "Never scanned", count: counts.never, color: "#dc2626"},
+        {key: "never", label: "No scan recorded", count: counts.never, color: "#dc2626"},
     ].map((item) => ({
         ...item,
         percent: totalHouses ? item.count * 100 / totalHouses : 0,
+        houses: housesByPattern[item.key],
     }));
 
     return {

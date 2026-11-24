@@ -4,6 +4,7 @@ import {
     analyzeHouseCoverage,
     analyzeOutsideBeatCollections,
     getReportWindowDays,
+    getBeatPlannerEmployeeOptions,
     getHighPriorityHouses,
     getHighPriorityAttentionHouses,
     getNextCollectionPriorities,
@@ -36,6 +37,45 @@ test("employee activity dots require house data and GPS points on the selected d
     assert.equal(isEmployeeActiveOnDate(beats, "no-house", "2026-11-23"), false);
     assert.equal(isEmployeeActiveOnDate(beats, "other-date", "2026-11-23"), false);
     assert.equal(isEmployeeActiveOnDate(beats, "active", null), false);
+});
+
+test("Beat planner employee options identify Beat owners and date-specific activity", () => {
+    const employees = [
+        {id: "active", name: "Active worker"},
+        {id: "no-beat", name: "No Beat worker"},
+        {id: "no-report", name: "Unavailable report"},
+    ];
+    const beats = [
+        {
+            id: "beat-1",
+            beatName: "Beat 1",
+            beatNameAvailable: false,
+            assignedEmployee: {id: "active", name: "Active worker"},
+            houses: [{houseId: "H1"}],
+            routes: [{date: "2026-11-24", trackPoints: [{lat: 21, lon: 75}]}],
+        },
+        {
+            id: "beat-2",
+            beatName: "Beat 2",
+            beatNameAvailable: false,
+            assignedEmployee: {id: "no-beat", name: "No Beat worker"},
+            houses: [],
+            routes: [],
+        },
+    ];
+
+    const options = getBeatPlannerEmployeeOptions(employees, beats, "2026-11-24");
+
+    assert.deepEqual(options.map((employee) => ({
+        id: employee.employeeId,
+        hasBeat: employee.hasBeat,
+        isActive: employee.isActive,
+        hasReport: employee.hasReport,
+    })), [
+        {id: "active", hasBeat: true, isActive: true, hasReport: true},
+        {id: "no-beat", hasBeat: false, isActive: false, hasReport: true},
+        {id: "no-report", hasBeat: false, isActive: null, hasReport: false},
+    ]);
 });
 
 test("uses the selected reporting window for house collection history", () => {

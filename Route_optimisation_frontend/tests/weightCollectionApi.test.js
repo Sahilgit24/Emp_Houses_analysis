@@ -8,6 +8,7 @@ import {
     fetchEmployeesForUlbs,
     fetchUlbDirectory,
     WEIGHT_API_ENDPOINTS,
+    clearWeightApiCache,
 } from "../src/data/weightCollectionApi.js";
 
 function response(payload, status = 200) {
@@ -158,4 +159,40 @@ test("limits concurrent report requests and reports individual failures", async 
     assert.deepEqual(result.errors.map(({employee}) => employee.id), ["3"]);
     assert.equal(progress.length, 5);
     assert.deepEqual(progress.at(-1), {completed: 5, total: 5});
+});
+
+test("reuses a recent API response and refetches after the cache is cleared", async () => {
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = async () => {
+        calls += 1;
+        return {ok: true, json: async () => [{appid: 1, ulb: `ULB call ${calls}`}]};
+    };
+    try {
+        clearWeightApiCache();
+        const first = await fetchUlbDirectory();
+        first[0].name = "mutated by caller";
+        const second = await fetchUlbDirectory();
+        assert.equal(calls, 1);
+        assert.equal(second[0].name, "ULB call 1", "cached data must not share objects with earlier callers");
+
+        clearWeightApiCache();
+        const third = await fetchUlbDirectory();
+        assert.equal(calls, 2);
+        assert.equal(third[0].name, "ULB call 2");
+    } finally {
+        globalThis.fetch = originalFetch;
+        clearWeightApiCache();
+    }
+});
+
+test("an injected fetcher always bypasses the cache", async () => {
+    let calls = 0;
+    const fetcher = async () => {
+        calls += 1;
+        return {ok: true, json: async () => [{appid: 1, ulb: "Test ULB"}]};
+    };
+    await fetchUlbDirectory({fetcher});
+    await fetchUlbDirectory({fetcher});
+    assert.equal(calls, 2);
 });

@@ -8,7 +8,7 @@ import { globalIgnores } from 'eslint/config'
 export default tseslint.config([
   globalIgnores(['dist']),
   {
-    files: ['**/*.{ts,tsx}'],
+    files: ['**/*.{js,jsx,ts,tsx}'],
     extends: [
       js.configs.recommended,
       tseslint.configs.recommended,
@@ -19,5 +19,10 @@ export default tseslint.config([
       ecmaVersion: 2020,
       globals: globals.browser,
     },
+  },
+  {
+    // shadcn/ui components export variant helpers next to the component by design.
+    files: ['src/components/ui/**'],
+    rules: {'react-refresh/only-export-components': 'off'},
   },
 ])

@@ -1353,7 +1353,7 @@ def optimize_beat_house_routes(track_points, houses, geofence_str, max_routes=4,
     from datetime import datetime
 
     import requests
-    from shapely.geometry import Point, Polygon
+    from shapely.geometry import MultiPolygon, Point, Polygon
 
     if not track_points:
         raise ValueError("Select a vehicle route day with at least one GPS point.")
@@ -1362,18 +1362,29 @@ def optimize_beat_house_routes(track_points, houses, geofence_str, max_routes=4,
     if not isinstance(geofence_str, str) or not geofence_str.strip():
         raise ValueError("A beat geofence is required.")
 
-    fence_coordinates = []
+    # A multi-part fence separates polygons with ":" ("lat,lon;lat,lon:lat,lon;lat,lon"),
+    # matching the frontend's geofence format.
+    fence_parts = []
     try:
-        for pair in geofence_str.split(";"):
-            lat, lon = map(float, pair.split(","))
-            if not (-90 <= lat <= 90 and -180 <= lon <= 180):
-                raise ValueError
-            fence_coordinates.append((lon, lat))
+        for polygon_text in geofence_str.split(":"):
+            fence_coordinates = []
+            for pair in polygon_text.split(";"):
+                lat, lon = map(float, pair.split(","))
+                if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                    raise ValueError
+                fence_coordinates.append((lon, lat))
+            fence_parts.append(fence_coordinates)
     except (TypeError, ValueError):
         raise ValueError("The beat geofence must contain valid 'lat,lon;lat,lon' coordinates.")
 
-    beat = Polygon(fence_coordinates)
-    if not beat.is_valid or beat.is_empty:
+    try:
+        polygons = [Polygon(coordinates) for coordinates in fence_parts]
+    except ValueError:
+        raise ValueError("The beat geofence is not a valid polygon.")
+    if not polygons or any(not polygon.is_valid or polygon.is_empty for polygon in polygons):
+        raise ValueError("The beat geofence is not a valid polygon.")
+    beat = polygons[0] if len(polygons) == 1 else MultiPolygon(polygons)
+    if not beat.is_valid:
         raise ValueError("The beat geofence is not a valid polygon.")
 
     ordered_track = []

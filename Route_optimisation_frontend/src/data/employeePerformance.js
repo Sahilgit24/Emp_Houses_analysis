@@ -63,6 +63,44 @@ export function isEmployeeActiveOnDate(beats, employeeId, date) {
     );
 }
 
+export function getBeatPlannerEmployeeOptions(employeeList, beats, selectedDate) {
+    const reportsByEmployeeId = new Map();
+    (beats || []).forEach((beat) => {
+        const id = String(beat.assignedEmployee?.id || beat.beatUserId || "");
+        if (id && !reportsByEmployeeId.has(id)) reportsByEmployeeId.set(id, beat);
+    });
+
+    const listedEmployees = Array.isArray(employeeList) ? employeeList : [];
+    const employees = listedEmployees.length
+        ? listedEmployees
+        : [...reportsByEmployeeId.entries()].map(([id, beat]) => ({
+            id,
+            name: beat.assignedEmployee?.name || `Employee ${id}`,
+        }));
+
+    return employees.map((employee) => {
+        const id = String(employee.id);
+        const beat = reportsByEmployeeId.get(id) || null;
+        const hasBeat = Boolean(
+            beat && (
+                beat.beatNameAvailable ||
+                beat.fencePolygons?.length ||
+                beat.houses?.length
+            )
+        );
+        return {
+            employeeId: id,
+            name: employee.name || beat?.assignedEmployee?.name || `Employee ${id}`,
+            mappingId: beat?.id || "",
+            beatId: beat?.id || "",
+            beatName: hasBeat ? beat.beatName : "",
+            hasBeat,
+            hasReport: Boolean(beat),
+            isActive: beat ? isEmployeeActiveOnDate(beats, id, selectedDate) : null,
+        };
+    });
+}
+
 export function summarizeDailyEmployeeReport(coverage, routes, selectedDate) {
     if (!coverage?.details || !selectedDate) return null;
 
@@ -375,6 +413,19 @@ export function analyzeHouseCoverage(houses, routes, fromDate, toDate, assignedE
         remainingWithoutHistory: notCollectedCount,
         requiringAttention: details.filter((detail) => detail.status !== "Regular"),
     };
+}
+
+export function getHistoricallyCollectedHouses(houses, routes, assignedEmployee, otherBeats = []) {
+    return analyzeHouseCoverage(
+        houses,
+        routes,
+        null,
+        null,
+        assignedEmployee,
+        otherBeats,
+    ).details
+        .filter((detail) => detail.collectionDates.length > 0)
+        .map((detail) => detail.house);
 }
 
 export function getHighPriorityHouses(coverage, reportWindowDays) {

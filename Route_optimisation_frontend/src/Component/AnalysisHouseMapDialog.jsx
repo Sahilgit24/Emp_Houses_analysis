@@ -124,8 +124,8 @@ export default function AnalysisHouseMapDialog({
     return (
         <Dialog open={open} onOpenChange={onOpenChange}>
             <DialogContent
-                overlayClassName="z-[1000]"
-                className="z-[1001] flex h-[90vh] w-[calc(100vw-2rem)] max-h-[900px] flex-col gap-3 overflow-hidden p-4 sm:max-w-7xl"
+                overlayClassName="z-[1500]"
+                className="z-[1501] flex h-[90vh] w-[calc(100vw-2rem)] max-h-[900px] flex-col gap-3 overflow-hidden p-4 sm:max-w-7xl"
             >
                 <DialogHeader className="shrink-0 pr-8">
                     <DialogTitle>{title}</DialogTitle>
