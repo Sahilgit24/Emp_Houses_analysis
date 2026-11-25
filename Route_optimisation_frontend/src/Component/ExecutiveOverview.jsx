@@ -14,10 +14,7 @@ import {
 } from "../components/ui/dialog";
 import {
     Activity,
-    Building2,
-    CircleDashed,
     Filter,
-    Globe2,
     Home,
     LayoutDashboard,
     PieChart,
@@ -25,7 +22,7 @@ import {
     UserCheck,
     UserX,
 } from "lucide-react";
-import {Avatar, HeroIcon, MiniBar, SectionIcon, StatIcon} from "./common/Decor.jsx";
+import {HeroIcon, MiniBar, SectionIcon, StatIcon} from "./common/Decor.jsx";
 import {toneFromTextClass} from "./common/decorTones.js";
 
 function OverviewFilter({label, children}) {
@@ -41,7 +38,7 @@ function employeeOptionKey(employee) {
     return `${encodeURIComponent(employee.ulbId)}:${encodeURIComponent(employee.id)}`;
 }
 
-function RingCoverage({percent, collected, total}) {
+export function RingCoverage({percent, collected, total}) {
     const radius = 43;
     const circumference = 2 * Math.PI * radius;
     const value = Math.max(0, Math.min(100, percent || 0));
@@ -227,7 +224,7 @@ function CollectionPattern({
     );
 }
 
-function EmployeeStatusCard({label, value, detail, tone, onClick, icon, total}) {
+export function EmployeeStatusCard({label, value, detail, tone, onClick, icon, total}) {
     const accent = toneFromTextClass(tone);
     const content = (
         <>
@@ -263,8 +260,6 @@ export default function ExecutiveOverview({
     selectedUlbId,
     sources,
     employeeListsByUlb,
-    liveDate,
-    ulbEmployeeErrors,
     reportErrors,
     isLoading,
     dateSelection,
@@ -274,9 +269,7 @@ export default function ExecutiveOverview({
     const [viewMode, setViewMode] = useState("latest");
     const [employeeStatusDialog, setEmployeeStatusDialog] = useState(null);
     const scopedSources = useMemo(
-        () => selectedUlbId === "all"
-            ? sources
-            : sources.filter((source) => String(source.ulbId || "") === String(selectedUlbId)),
+        () => sources.filter((source) => String(source.ulbId || "") === String(selectedUlbId)),
         [selectedUlbId, sources],
     );
     const availableDates = useMemo(
@@ -287,11 +280,9 @@ export default function ExecutiveOverview({
         () => getExecutiveEmployees(sources, employeeListsByUlb, selectedUlbId, ulbs),
         [employeeListsByUlb, selectedUlbId, sources, ulbs],
     );
-    const selectedEmployee = selectedUlbId === "all"
-        ? null
-        : employeeOptions.find(
-            (employee) => employeeOptionKey(employee) === employeeSelection,
-        ) || null;
+    const selectedEmployee = employeeOptions.find(
+        (employee) => employeeOptionKey(employee) === employeeSelection,
+    ) || null;
 
     useEffect(() => {
         if (employeeSelection !== "all" &&
@@ -305,11 +296,9 @@ export default function ExecutiveOverview({
     }, [appliedRange]);
 
     const latestDate = availableDates.at(-1) || "";
-    const selectedDate = selectedUlbId === "all"
-        ? liveDate
-        : viewMode === "latest"
-            ? (appliedRange?.toDate || (dateSelection === "live" ? latestDate : dateSelection) || latestDate)
-            : appliedRange?.toDate || latestDate;
+    const selectedDate = viewMode === "latest"
+        ? (appliedRange?.toDate || (dateSelection === "live" ? latestDate : dateSelection) || latestDate)
+        : appliedRange?.toDate || latestDate;
     const selectedRangeLabel = appliedRange
         ? `${appliedRange.fromDate} to ${appliedRange.toDate}`
         : "";
@@ -322,22 +311,12 @@ export default function ExecutiveOverview({
         });
         return idsByUlb;
     }, [sources]);
-    const summaryEmployeeListsByUlb = useMemo(() => {
-        if (selectedUlbId !== "all") return employeeListsByUlb;
-        return Object.fromEntries(Object.entries(employeeListsByUlb).map(([ulbId, list]) => {
-            const loadedIds = loadedEmployeeIdsByUlb.get(String(ulbId)) || new Set();
-            return [ulbId, {
-                ...list,
-                employees: list.employees.filter((employee) => loadedIds.has(String(employee.id))),
-            }];
-        }));
-    }, [employeeListsByUlb, loadedEmployeeIdsByUlb, selectedUlbId]);
     const summary = useMemo(
         () => viewMode === "average" && appliedRange
             ? averageExecutiveOverview(
                 scopedSources,
                 ulbs,
-                summaryEmployeeListsByUlb,
+                employeeListsByUlb,
                 selectedUlbId,
                 appliedRange.fromDate,
                 appliedRange.toDate,
@@ -346,14 +325,14 @@ export default function ExecutiveOverview({
             : summarizeExecutiveOverview(
                 scopedSources,
                 ulbs,
-                summaryEmployeeListsByUlb,
+                employeeListsByUlb,
                 selectedUlbId,
                 selectedDate,
                 selectedEmployee,
             ),
         [
             appliedRange,
-            summaryEmployeeListsByUlb,
+            employeeListsByUlb,
             scopedSources,
             selectedDate,
             selectedEmployee,
@@ -362,59 +341,10 @@ export default function ExecutiveOverview({
             viewMode,
         ],
     );
-    const allUlbActivity = useMemo(() => {
-        const activeEmployeeKeys = new Set(summary.activeEmployeeList.map(
-            (employee) => `${employee.ulbId}\u0000${employee.id}`,
-        ));
-        const listErrors = new Set(ulbEmployeeErrors.map(({ulb}) => String(ulb.id)));
-        const rows = ulbs.map((ulb) => {
-            const ulbId = String(ulb.id);
-            const listedEmployees = employeeListsByUlb[ulbId]?.employees;
-            const loadedIds = loadedEmployeeIdsByUlb.get(ulbId) || new Set();
-            const activeCount = (listedEmployees || []).filter((employee) =>
-                activeEmployeeKeys.has(`${ulbId}\u0000${employee.id}`)
-            ).length;
-            const missingCount = listedEmployees
-                ? listedEmployees.filter((employee) => !loadedIds.has(String(employee.id))).length
-                : 0;
-            let status;
-            if (!listedEmployees) status = listErrors.has(ulbId) ? "Unavailable" : isLoading ? "Loading" : "Unavailable";
-            else if (!listedEmployees.length) status = "No employees";
-            else if (activeCount && missingCount && isLoading) status = "Active · loading";
-            else if (activeCount && missingCount) status = "Active · partial";
-            else if (activeCount) status = "Active";
-            else if (missingCount && isLoading) status = "Loading";
-            else if (missingCount) status = "Partial";
-            else status = "Inactive";
-            return {
-                ...ulb,
-                employeeCount: listedEmployees?.length || 0,
-                activeCount,
-                missingCount,
-                status,
-            };
-        });
-        const rank = (status) => status.startsWith("Active") ? 0
-            : status === "Partial" ? 1
-                : status === "Inactive" ? 2 : 3;
-        return rows.sort((a, b) =>
-            rank(a.status) - rank(b.status) || a.name.localeCompare(b.name)
-        );
-    }, [employeeListsByUlb, isLoading, loadedEmployeeIdsByUlb, summary.activeEmployeeList, ulbEmployeeErrors, ulbs]);
-    const listedEmployeesCount = Object.values(employeeListsByUlb).reduce(
-        (total, list) => total + list.employees.length,
-        0,
-    );
-    const missingReportsCount = allUlbActivity.reduce((total, row) => total + row.missingCount, 0);
-    const activeUlbsCount = allUlbActivity.filter((row) => row.activeCount > 0).length;
-    const inactiveUlbsCount = allUlbActivity.filter((row) => row.status === "Inactive").length;
-    const incompleteUlbsCount = allUlbActivity.length - activeUlbsCount - inactiveUlbsCount;
-    const hasIncompleteData = ulbEmployeeErrors.length > 0 || reportErrors.length > 0 || missingReportsCount > 0;
-    const reportScopeUlbIds = selectedUlbId === "all"
-        ? ulbs.map((ulb) => String(ulb.id))
-        : [String(selectedUlbId)];
+    const reportScopeUlbIds = [String(selectedUlbId)];
     const expectedReportCount = reportScopeUlbIds.reduce(
-        (total, ulbId) => total + (employeeListsByUlb[ulbId]?.employees.length || 0),
+        (total, ulbId) => total + (employeeListsByUlb[ulbId]?.employees || [])
+            .filter((employee) => employee.hasBeat !== false).length,
         0,
     );
     const loadedReportCount = reportScopeUlbIds.reduce(
@@ -422,15 +352,9 @@ export default function ExecutiveOverview({
         0,
     );
     const scopedReportErrors = reportErrors.filter((error) =>
-        selectedUlbId === "all" || !error.ulbId || String(error.ulbId) === String(selectedUlbId)
+        !error.ulbId || String(error.ulbId) === String(selectedUlbId)
     );
-    const scopedUlbErrors = ulbEmployeeErrors.filter(({ulb}) =>
-        selectedUlbId === "all" || String(ulb.id) === String(selectedUlbId)
-    );
-    const missingEmployeeLists = reportScopeUlbIds.filter((ulbId) =>
-        !employeeListsByUlb[ulbId] &&
-        !scopedUlbErrors.some(({ulb}) => String(ulb.id) === ulbId)
-    ).length;
+    const missingEmployeeLists = reportScopeUlbIds.filter((ulbId) => !employeeListsByUlb[ulbId]).length;
     const missingReportCount = Math.max(
         0,
         expectedReportCount - loadedReportCount - scopedReportErrors.length,
@@ -443,10 +367,10 @@ export default function ExecutiveOverview({
             detail: `${missingEmployeeLists.toLocaleString()} ULB employee list${missingEmployeeLists === 1 ? "" : "s"} still loading.`,
             incomplete: true,
         }
-        : scopedReportErrors.length || scopedUlbErrors.length || missingReportCount || missingEmployeeLists
+        : scopedReportErrors.length || missingReportCount || missingEmployeeLists
             ? {
                 label: "Partial report data",
-                detail: `${loadedReportCount.toLocaleString()} of ${expectedReportCount.toLocaleString()} employee reports loaded · ${scopedReportErrors.length.toLocaleString()} failed · ${scopedUlbErrors.length.toLocaleString()} ULB employee list${scopedUlbErrors.length === 1 ? "" : "s"} failed.`,
+                detail: `${loadedReportCount.toLocaleString()} of ${expectedReportCount.toLocaleString()} employee reports loaded · ${scopedReportErrors.length.toLocaleString()} failed.`,
                 incomplete: true,
             }
             : expectedReportCount
@@ -469,195 +393,6 @@ export default function ExecutiveOverview({
     const statusDialogDescription = viewMode === "average"
         ? `Employee status is shown for the final day of ${selectedRangeLabel}. The dashboard card displays the average per day across the full date range.`
         : `Employee status for ${selectedDate || "the selected date"} and the current ULB and employee filters.`;
-
-    if (selectedUlbId === "all") {
-        return (
-            <div className="h-full overflow-y-auto bg-slate-50 p-4 sm:p-6">
-                <div className="mx-auto flex w-full max-w-7xl flex-col gap-5">
-                    <header className="page-hero page-hero-teal page-hero-row">
-                        <HeroIcon icon={Globe2} tone="teal"/>
-                        <div className="page-hero-text">
-                        <p className="text-sm font-semibold text-blue-700">Live monitoring · {liveDate} IST</p>
-                        <h1 className="mt-1 text-2xl font-bold text-slate-900">All ULBs</h1>
-                        <p className="mt-1 text-sm text-slate-600">
-                            Daily activity and collection status across Maharashtra. All-ULB monitoring is live-date only.
-                        </p>
-                        <p className="mt-1 text-xs text-slate-500">
-                            Live totals are calculated from each listed employee report; loading across all ULBs can take time.
-                        </p>
-                        </div>
-                    </header>
-                    {hasIncompleteData && !isLoading && (
-                        <p role="status" className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
-                            Some live data could not be loaded. Metrics below use successfully loaded employee reports only; employees with failed reports are not classified as inactive.
-                            {missingReportsCount > 0 && ` ${missingReportsCount.toLocaleString()} employee reports are missing.`}
-                        </p>
-                    )}
-                    <section aria-label="All-ULB live totals" className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                        <EmployeeStatusCard
-                            label="Active ULBs today"
-                            icon={Building2} total={activeUlbsCount + inactiveUlbsCount + incompleteUlbsCount}
-                            value={activeUlbsCount}
-                            detail="At least one employee has GPS and house records today"
-                            tone="text-emerald-700"
-                        />
-                        <EmployeeStatusCard
-                            label="Inactive ULBs today"
-                            icon={Building2} total={activeUlbsCount + inactiveUlbsCount + incompleteUlbsCount}
-                            value={inactiveUlbsCount}
-                            detail="All listed employee reports loaded; no qualifying activity today"
-                            tone="text-amber-700"
-                        />
-                        <EmployeeStatusCard
-                            label="ULBs pending / incomplete"
-                            icon={CircleDashed} total={activeUlbsCount + inactiveUlbsCount + incompleteUlbsCount}
-                            value={incompleteUlbsCount}
-                            detail="Loading, partial, unavailable, or no employee records"
-                            tone="text-slate-700"
-                        />
-                        <EmployeeStatusCard
-                            label="Active employees today"
-                            icon={UserCheck} total={summary.totalEmployees}
-                            value={summary.activeEmployees}
-                            detail={`${summary.totalEmployees.toLocaleString()} employees with successful reports`}
-                            tone="text-emerald-700"
-                            onClick={() => setEmployeeStatusDialog("active")}
-                        />
-                        <EmployeeStatusCard
-                            label="Inactive employees today"
-                            icon={UserX} total={summary.totalEmployees}
-                            value={summary.inactiveEmployees}
-                            detail="No qualifying GPS and house activity in loaded reports"
-                            tone="text-amber-700"
-                            onClick={() => setEmployeeStatusDialog("inactive")}
-                        />
-                        <EmployeeStatusCard
-                            label="Houses in loaded reports"
-                            icon={Home}
-                            value={summary.totalHouses}
-                            detail={`${summary.collectedHouses.toLocaleString()} collected through today`}
-                            tone="text-slate-900"
-                        />
-                    </section>
-
-                    <section aria-labelledby="all-ulb-coverage-heading" className="grid gap-4 lg:grid-cols-[minmax(260px,0.8fr)_minmax(0,1.2fr)]">
-                        <article className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
-                            <h2 id="all-ulb-coverage-heading" className="section-heading font-semibold text-slate-900"><SectionIcon icon={Target} tone="emerald"/>Live Coverage</h2>
-                            <p className="mt-1 text-sm text-slate-500">
-                                Collection status through {liveDate}; based on loaded reports.
-                            </p>
-                            <div className="mt-3">
-                                <RingCoverage
-                                    percent={summary.coveragePercent}
-                                    collected={summary.collectedHouses}
-                                    total={summary.totalHouses}
-                                />
-                            </div>
-                        </article>
-                        <CollectionPattern
-                            summary={summary}
-                            selectedDate={liveDate}
-                            viewMode="latest"
-                            selectedRangeLabel=""
-                            reportStatus={reportStatus}
-                            showUlbColumn
-                        />
-                    </section>
-
-                    <section aria-labelledby="ulb-activity-heading" className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
-                        <div className="p-4 sm:p-5">
-                            <h2 id="ulb-activity-heading" className="section-heading font-semibold text-slate-900"><SectionIcon icon={Building2} tone="blue"/>ULB Activity Today</h2>
-                            <p className="mt-1 text-sm text-slate-500">
-                                Active means at least one reported employee has GPS route points dated today and house records in the report.
-                            </p>
-                        </div>
-                        <div className="max-h-[34rem] overflow-auto">
-                            <table className="w-full min-w-[640px] border-collapse text-left text-sm">
-                                <thead className="sticky top-0 bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
-                                    <tr>
-                                        <th scope="col" className="px-4 py-3 font-semibold">ULB</th>
-                                        <th scope="col" className="px-4 py-3 font-semibold">Employees</th>
-                                        <th scope="col" className="px-4 py-3 font-semibold">Active today</th>
-                                        <th scope="col" className="px-4 py-3 font-semibold">Status</th>
-                                    </tr>
-                                </thead>
-                                <tbody className="divide-y divide-slate-100">
-                                    {allUlbActivity.map((ulb) => {
-                                        const statusTone = ulb.status.startsWith("Active")
-                                            ? "bg-emerald-100 text-emerald-800"
-                                            : ulb.status === "Inactive"
-                                                ? "bg-slate-100 text-slate-700"
-                                                : "bg-amber-100 text-amber-800";
-                                        return (
-                                            <tr key={ulb.id}>
-                                                <th scope="row" className="px-4 py-3 font-medium text-slate-800">
-                                                    <span className="person-cell"><Avatar name={ulb.name}/>{ulb.name}</span>
-                                                </th>
-                                                <td className="px-4 py-3 tabular-nums text-slate-600">{ulb.employeeCount.toLocaleString()}</td>
-                                                <td className="px-4 py-3 tabular-nums text-slate-600">{ulb.activeCount.toLocaleString()}</td>
-                                                <td className="px-4 py-3">
-                                                    <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${statusTone}`}>
-                                                        {ulb.status}
-                                                    </span>
-                                                    {ulb.missingCount > 0 && (
-                                                        <span className="ml-2 text-xs text-amber-800">
-                                                            {ulb.missingCount} report{ulb.missingCount === 1 ? "" : "s"} {isLoading ? "pending" : "missing"}
-                                                        </span>
-                                                    )}
-                                                </td>
-                                            </tr>
-                                        );
-                                    })}
-                                </tbody>
-                            </table>
-                        </div>
-                    </section>
-                    <p className="text-xs text-slate-500">
-                        Employee activity is measured from the selected date in IST. Collection categories use each house&apos;s latest recorded scan through that date.
-                        {listedEmployeesCount > 0 && ` ${summary.totalEmployees.toLocaleString()} of ${listedEmployeesCount.toLocaleString()} listed employees have successful reports.`}
-                    </p>
-                </div>
-                <Dialog
-                    open={Boolean(employeeStatusDialog)}
-                    onOpenChange={(open) => {
-                        if (!open) setEmployeeStatusDialog(null);
-                    }}
-                >
-                    <DialogContent className="flex max-h-[85vh] flex-col overflow-hidden sm:max-w-lg">
-                        <DialogHeader className="shrink-0 pr-8">
-                            <DialogTitle>{statusDialogTitle}</DialogTitle>
-                            <DialogDescription>{statusDialogDescription}</DialogDescription>
-                        </DialogHeader>
-                        <div className="min-h-0 flex-1 overflow-y-auto">
-                            {statusEmployees.length ? (
-                                <ul className="divide-y divide-slate-100">
-                                    {statusEmployees.map((employee) => (
-                                        <li key={`${employee.ulbId}:${employee.id}`} className="flex items-center justify-between gap-3 py-3">
-                                            <div className="min-w-0">
-                                                <p className="truncate text-sm font-medium text-slate-800">{employee.name}</p>
-                                                <p className="mt-1 text-xs text-slate-500">ID: {employee.id} · {employee.ulbName}</p>
-                                            </div>
-                                            <span className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold ${
-                                                employee.isActive
-                                                    ? "bg-emerald-100 text-emerald-800"
-                                                    : "bg-amber-100 text-amber-800"
-                                            }`}>
-                                                {employee.isActive ? "Active" : "Inactive"}
-                                            </span>
-                                        </li>
-                                    ))}
-                                </ul>
-                            ) : (
-                                <p role="status" className="py-8 text-center text-sm text-slate-500">
-                                    No successfully reported {employeeStatusDialog} employees for today.
-                                </p>
-                            )}
-                        </div>
-                    </DialogContent>
-                </Dialog>
-            </div>
-        );
-    }
 
     return (
         <div className="h-full overflow-y-auto bg-slate-50 p-4 sm:p-6">

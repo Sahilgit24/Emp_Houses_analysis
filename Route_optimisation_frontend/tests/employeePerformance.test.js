@@ -9,6 +9,8 @@ import {
     getHighPriorityAttentionHouses,
     getNextCollectionPriorities,
     getCoverageTrend,
+    getWeeklyWindows,
+    summarizeWeeklyCoverageTrend,
     isEmployeeActiveOnDate,
     summarizeCollectionPatterns,
     summarizeDailyEmployeeReport,
@@ -528,4 +530,68 @@ test("summarizes repeated collection, lower frequency, recurring gaps, and perio
         busiestMonth: {month: "2026-11", houseDays: 2},
         recordedHouseDays: 3,
     });
+});
+
+test("splits a 30-day window into four full weeks ending on the selected date", () => {
+    assert.deepEqual(getWeeklyWindows("2026-10-26", "2026-11-24"), [
+        {fromDate: "2026-10-28", toDate: "2026-11-03"},
+        {fromDate: "2026-11-04", toDate: "2026-11-10"},
+        {fromDate: "2026-11-11", toDate: "2026-11-17"},
+        {fromDate: "2026-11-18", toDate: "2026-11-24"},
+    ]);
+    assert.deepEqual(getWeeklyWindows("2026-11-14", "2026-11-24"), [
+        {fromDate: "2026-11-18", toDate: "2026-11-24"},
+    ]);
+    assert.deepEqual(getWeeklyWindows("2026-11-20", "2026-11-24"), []);
+    assert.deepEqual(getWeeklyWindows("2026-11-24", "2026-11-20"), []);
+});
+
+test("compares the latest week with the average of earlier weeks", () => {
+    const weeks = [
+        {fromDate: "a", toDate: "a", percent: 50},
+        {fromDate: "b", toDate: "b", percent: 60},
+        {fromDate: "c", toDate: "c", percent: 70},
+    ];
+    const trend = summarizeWeeklyCoverageTrend(weeks);
+    assert.equal(trend.latest.percent, 70);
+    assert.equal(trend.earlierAverage, 55);
+    assert.equal(trend.earlierWeekCount, 2);
+    assert.equal(trend.changePercentagePoints, 15);
+    assert.equal(trend.trend, "Improving");
+
+    assert.equal(summarizeWeeklyCoverageTrend([{percent: 60}, {percent: 52}]).trend, "Declining");
+    assert.equal(summarizeWeeklyCoverageTrend([{percent: 60}, {percent: 60.5}]).trend, "Stable");
+});
+
+test("weekly trend needs at least two measured weeks", () => {
+    assert.equal(summarizeWeeklyCoverageTrend([]).trend, "Insufficient data");
+    const single = summarizeWeeklyCoverageTrend([{percent: 40}, {percent: null}]);
+    assert.equal(single.trend, "Insufficient data");
+    assert.equal(single.changePercentagePoints, null);
+});
+
+test("outside-Beat collections are read from the other Beat's house scan history", () => {
+    const otherBeats = [{
+        id: "beat-ankush",
+        beatName: "Beat assigned to Ankush",
+        houses: [
+            {houseId: "H1", referenceId: "R1", historyEvents: [
+                {date: "2026-11-24", scannerUserId: "6"},
+                {date: "2026-11-25", scannerUserId: "6"},
+            ]},
+            {houseId: "H2", referenceId: "R2", historyEvents: [{date: "2026-11-25", scannerUserId: "65"}]},
+            {houseId: "H3", referenceId: "R3", historyEvents: [{date: "2026-10-01", scannerUserId: "6"}]},
+        ],
+    }];
+    // The employee's own routes carry GPS only (no collection scans), as in the live API.
+    const routes = [{date: "2026-11-25", collectionScans: []}];
+    const analysis = analyzeOutsideBeatCollections(routes, otherBeats, "6", "2026-11-20", "2026-11-25");
+    assert.equal(analysis.totalHouses, 1);
+    assert.deepEqual(analysis.byBeat, [{
+        beatId: "beat-ankush", beatName: "Beat assigned to Ankush", count: 1, houseIds: ["H1"],
+    }]);
+    assert.deepEqual(analysis.byDate, [
+        {date: "2026-11-24", houseIds: ["H1"]},
+        {date: "2026-11-25", houseIds: ["H1"]},
+    ]);
 });

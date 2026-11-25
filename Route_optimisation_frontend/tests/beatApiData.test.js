@@ -135,6 +135,30 @@ test("uses unique HouseIds and ignores RouteDetails houses and Collectionlist", 
     assert.deepEqual(beat.houses.find((item) => item.houseId === "H3").history.collectionDates, []);
 });
 
+test("skips an invalid boundary piece, keeps the valid one, and still loads the report", () => {
+    const brokenBoundary = structuredClone(sample);
+    brokenBoundary.RouteDetails.geofence = "21,75;21,76;22,76:22.5,76.5;22.6,76.6";
+    const [beat] = normalizeBeatApiPayload(brokenBoundary).beats;
+    assert.deepEqual(beat.fencePolygons, [[[21, 75], [21, 76], [22, 76]]]);
+    assert.equal(beat.geofenceIssues.length, 1);
+    assert.match(beat.geofenceIssues[0], /polygon 2 has 2 points/);
+    assert.ok(beat.houses.length > 0);
+});
+
+test("loads a report whose whole boundary is invalid, without a boundary", () => {
+    const brokenBoundary = structuredClone(sample);
+    brokenBoundary.RouteDetails.geofence = "21,75;21,76";
+    const [beat] = normalizeBeatApiPayload(brokenBoundary).beats;
+    assert.deepEqual(beat.fencePolygons, []);
+    assert.deepEqual(beat.fencePoints, []);
+    assert.equal(beat.geofenceIssues.length, 1);
+});
+
+test("a valid boundary has no boundary issues", () => {
+    const [beat] = normalizeBeatApiPayload(structuredClone(sample)).beats;
+    assert.deepEqual(beat.geofenceIssues, []);
+});
+
 test("reads the geofence from BeatWiseReport", () => {
     const withReportGeofence = structuredClone(sample);
     withReportGeofence.BeatWiseReport.Geofence = "21.1,75.1;21.2,75.2;21.3,75.3";

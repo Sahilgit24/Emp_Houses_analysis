@@ -19,8 +19,6 @@ import {
     analyzeHouseCoverage,
     getBeatPlannerEmployeeOptions,
     getHistoricallyCollectedHouses,
-    getHighPriorityHouses,
-    getReportWindowDays,
 } from "@/data/employeePerformance.js";
 import {createEmployeeGeofence, OUTLIER_DISTANCE_METERS} from "@/data/employeeGeofence.js";
 import {isInsidePolygon} from "@/data/routeBeatData.js";
@@ -461,8 +459,6 @@ function BeatRouteMap({
     nearRouteThreshold,
     coveredHouseIds,
     showCollectedOnly,
-    showHighPriorityOnly,
-    highPriorityHouseIds,
     geofencePreview,
     collectionMappingAvailable,
     isMapMaximized,
@@ -489,10 +485,9 @@ function BeatRouteMap({
     const visibleHouses = useMemo(
         () => (beat?.houses || []).filter((house) =>
             house.lat != null && house.lon != null &&
-            (!showHighPriorityOnly || highPriorityHouseIds.has(house.house_id)) &&
             (!showCollectedOnly || coveredHouseIds.has(house.house_id))
         ),
-        [beat, coveredHouseIds, highPriorityHouseIds, showCollectedOnly, showHighPriorityOnly],
+        [beat, coveredHouseIds, showCollectedOnly],
     );
     const houseEntries = useMemo(() => beat
         ? visibleHouses.map((house) => ({house, beat}))
@@ -600,9 +595,7 @@ function BeatRouteMap({
                     beat: houseBeat,
                     hasBeatDetails: Boolean(beat),
                     popupLines,
-                    statusIcon: showHighPriorityOnly && highPriorityHouseIds.has(house.house_id)
-                        ? "attention"
-                        : collectionStatus,
+                    statusIcon: collectionStatus,
                 },
             };
         }),
@@ -611,17 +604,14 @@ function BeatRouteMap({
         attentionDetailsByBeat,
         collectionMappingAvailable,
         coveredHouseIds,
-        highPriorityHouseIds,
         houseEntries,
         optimizationCandidateHouseIds,
         plannedHouseKeys,
         selectedDate,
-        showHighPriorityOnly,
     ]);
     const vehiclePosition = getRoutePosition(playbackPath, progress);
     const bounds = useMemo(() => {
         const housePoints = houseEntries.map(({house}) => [house.lat, house.lon]);
-        if (showHighPriorityOnly) return housePoints;
         const pathPoints = sampleTrackPoints(selectedRoute?.route_path || [], 2000)
             .map((point) => [point.lat, point.lon]);
         const recordedPathPoints = sampleTrackPoints(recordedRoute?.route_path?.length
@@ -640,7 +630,7 @@ function BeatRouteMap({
             sampleTrackPoints(item.trackPoints, 1000).map((point) => [point.lat, point.lon])
         );
         return [...pathPoints, ...recordedPathPoints, ...housePoints, ...dumpyardPoints, ...endpoints, ...fencePoints, ...optimizerFencePoints, ...previewFencePoints, ...employeePoints];
-    }, [beat, boundaryBeats, employeeRouteLayers, geofencePreview, houseEntries, recordedRoute, selectedRoute, showHighPriorityOnly, stops, trackPoints]);
+    }, [beat, boundaryBeats, employeeRouteLayers, geofencePreview, houseEntries, recordedRoute, selectedRoute, stops, trackPoints]);
     const center = bounds[0] || [0, 0];
     const tileUrl = layer === "satellite"
         ? "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
@@ -930,8 +920,6 @@ export default function BeatHouseRoutePlanner({
     const [maxDistanceKm, setMaxDistanceKm] = useState("30");
     const [nearRouteThreshold, setNearRouteThreshold] = useState("50");
     const [showCollectedOnly, setShowCollectedOnly] = useState(false);
-    const [showHighPriorityOnly, setShowHighPriorityOnly] = useState(false);
-    const [highPriorityHouseIds, setHighPriorityHouseIds] = useState(() => new Set());
     const [selectedHouse, setSelectedHouse] = useState(null);
     const [houseDetailsVisible, setHouseDetailsVisible] = useState(false);
     const [houseSearchQuery, setHouseSearchQuery] = useState("");
@@ -1133,26 +1121,6 @@ export default function BeatHouseRoutePlanner({
     const selectedRoute = routes.find((route) => route.route_id === selectedRouteId) || null;
     const collectionMappingAvailable = Boolean(beat?.hasHouseIds && day);
     const coveredHouseIds = useMemo(() => getCollectedHouseIds(beat, day), [beat, day]);
-    const highPriorityHouseIdsForBeat = useMemo(() => {
-        if (!beat) return new Set();
-        const otherBeats = beatFiles.filter((item) => item.id !== beat.id);
-        const coverage = analyzeHouseCoverage(
-            beat.houses,
-            beat.routes,
-            beat.fromDate,
-            beat.toDate,
-            beat.assignedEmployee,
-            otherBeats,
-        );
-        return new Set(getHighPriorityHouses(
-            coverage,
-            getReportWindowDays(beat.fromDate, beat.toDate),
-        )
-            .filter(({detail}) =>
-                Number.isFinite(detail.house.lat) && Number.isFinite(detail.house.lon)
-            )
-            .map(({detail}) => detail.house.houseId));
-    }, [beat, beatFiles]);
     const selectedHouseRoute = useMemo(
         () => selectedHouse?.beat?.routes.find((route) => route.date === selectedDate) || null,
         [selectedDate, selectedHouse],
@@ -1232,8 +1200,6 @@ export default function BeatHouseRoutePlanner({
             setSelectedBeatId("");
             setSelectedEmployeeKey(ALL_EMPLOYEES);
             setShowCollectedOnly(false);
-            setShowHighPriorityOnly(false);
-            setHighPriorityHouseIds(new Set());
             setRoutes([]);
             setRecordedRoute(null);
             setSelectedRouteId("");
@@ -1244,8 +1210,6 @@ export default function BeatHouseRoutePlanner({
             setSelectedBeatId("");
             setSelectedEmployeeKey(ALL_EMPLOYEES);
             setShowCollectedOnly(false);
-            setShowHighPriorityOnly(false);
-            setHighPriorityHouseIds(new Set());
             setRoutes([]);
             setRecordedRoute(null);
             setSelectedRouteId("");
@@ -1254,8 +1218,6 @@ export default function BeatHouseRoutePlanner({
         setSelectedBeatId(firstBeat.id);
         setSelectedEmployeeKey(firstBeat.id);
         setShowCollectedOnly(false);
-        setShowHighPriorityOnly(false);
-        setHighPriorityHouseIds(new Set());
         setRoutes([]);
         setRecordedRoute(null);
         setSelectedRouteId("");
@@ -1439,10 +1401,6 @@ export default function BeatHouseRoutePlanner({
         if (showCollectedOnly && beat?.id === match.beat.id && !coveredHouseIds.has(match.house.house_id)) {
             setShowCollectedOnly(false);
         }
-        if (showHighPriorityOnly && !highPriorityHouseIds.has(match.house.house_id)) {
-            setShowHighPriorityOnly(false);
-            setHighPriorityHouseIds(new Set());
-        }
         setSelectedHouse(match);
         setHouseDetailsVisible(true);
         setHouseSearchError("");
@@ -1481,8 +1439,6 @@ export default function BeatHouseRoutePlanner({
                                         setGeofencePreview(null);
                                         setGeofenceError("");
                                         setShowCollectedOnly(false);
-                                        setShowHighPriorityOnly(false);
-                                        setHighPriorityHouseIds(new Set());
                                         clearResults();
                                         setError("");
                                         setNotice("");
@@ -1545,13 +1501,11 @@ export default function BeatHouseRoutePlanner({
                         <div className="flex flex-wrap items-center justify-between gap-3">
                         {beat && (
                             <div className="flex flex-wrap items-center gap-2">
-                                {showHighPriorityOnly || showCollectedOnly ? (
+                                {showCollectedOnly ? (
                                     <button
                                         type="button"
                                         onClick={() => {
-                                            setShowHighPriorityOnly(false);
                                             setShowCollectedOnly(false);
-                                            setHighPriorityHouseIds(new Set());
                                             setSelectedHouse(null);
                                             setHouseDetailsVisible(false);
                                         }}
@@ -1576,21 +1530,6 @@ export default function BeatHouseRoutePlanner({
                                                 Show only {day.date} collections ({coveredHouseIds.size} houses)
                                             </button>
                                         )}
-                                        <button
-                                            type="button"
-                                            title="Filter to high-priority houses based on this Beat's full reporting period, not just the selected day."
-                                            disabled={!highPriorityHouseIdsForBeat.size}
-                                            onClick={() => {
-                                                setShowHighPriorityOnly(true);
-                                                setShowCollectedOnly(false);
-                                                setHighPriorityHouseIds(highPriorityHouseIdsForBeat);
-                                                setSelectedHouse(null);
-                                                setHouseDetailsVisible(false);
-                                            }}
-                                            className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-900 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
-                                        >
-                                            Show High-Priority Houses (30-day) ({highPriorityHouseIdsForBeat.size})
-                                        </button>
                                         {day && day.collectionScans.length > 0 && coveredHouseIds.size === 0 && (
                                             <span className="max-w-56 text-xs text-amber-800">
                                                 This date has scans, but none match a house in this Beat.
@@ -2023,8 +1962,6 @@ export default function BeatHouseRoutePlanner({
                                 nearRouteThreshold={Math.max(0, Number(nearRouteThreshold) || 0)}
                                 coveredHouseIds={coveredHouseIds}
                                 showCollectedOnly={showCollectedOnly}
-                                showHighPriorityOnly={showHighPriorityOnly}
-                                highPriorityHouseIds={highPriorityHouseIds}
                                 geofencePreview={geofencePreview?.beatId === beat?.id ? geofencePreview : null}
                                 collectionMappingAvailable={collectionMappingAvailable}
                                 isMapMaximized={isMapMaximized}

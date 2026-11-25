@@ -62,6 +62,7 @@ export function findOutsideBeatCollectionAlerts(
                     employeeId,
                     employeeName: employeeNames.get(employeeId) || event.scannerName || `Employee ${employeeId}`,
                     employeeUlbName: employeeUlbNames.join(", ") || "Unknown",
+                    ulbId: targetUlbId,
                     ulbName: ulbNames.get(targetUlbId) || targetUlbId || "Unknown",
                     beatName: targetBeat.beatName,
                 };
@@ -76,4 +77,65 @@ export function findOutsideBeatCollectionAlerts(
         a.employeeName.localeCompare(b.employeeName) ||
         a.houseId.localeCompare(b.houseId)
     );
+}
+
+/**
+ * Groups outside-Beat alerts for display: one entry per collection ULB, each listing the
+ * employees who collected there and, for every employee, the houses they scanned.
+ * The alerts themselves are unchanged; this only arranges them.
+ */
+export function groupAlertsByUlb(alerts) {
+    const ulbs = new Map();
+    alerts.forEach((alert) => {
+        const ulbName = alert.ulbName || "Unknown";
+        // Group by the ULB's ID (names are not guaranteed unique); fall back to the name without an ID.
+        const ulbKey = alert.ulbId ? `id:${alert.ulbId}` : `name:${ulbName}`;
+        let ulb = ulbs.get(ulbKey);
+        if (!ulb) {
+            ulb = {ulbKey, ulbId: alert.ulbId || "", ulbName, alerts: [], employees: new Map()};
+            ulbs.set(ulbKey, ulb);
+        }
+        ulb.alerts.push(alert);
+        // Employee IDs are only unique within their own ULB, so the key includes it.
+        const employeeKey = `${alert.employeeUlbName || ""}\u0000${alert.employeeId}`;
+        let employee = ulb.employees.get(employeeKey);
+        if (!employee) {
+            employee = {
+                key: employeeKey,
+                employeeId: alert.employeeId,
+                employeeName: alert.employeeName,
+                employeeUlbName: alert.employeeUlbName,
+                alerts: [],
+            };
+            ulb.employees.set(employeeKey, employee);
+        }
+        employee.alerts.push(alert);
+    });
+
+    const summarize = (items) => {
+        const dates = items.map((alert) => alert.date).sort();
+        return {
+            alertCount: items.length,
+            houseCount: new Set(items.map((alert) => alert.houseId)).size,
+            beatNames: [...new Set(items.map((alert) => alert.beatName).filter(Boolean))].sort(),
+            firstDate: dates[0] || "",
+            lastDate: dates.at(-1) || "",
+        };
+    };
+
+    return [...ulbs.values()]
+        .map((ulb) => {
+            const employees = [...ulb.employees.values()]
+                .map((employee) => ({...employee, ...summarize(employee.alerts)}))
+                .sort((a, b) => b.alertCount - a.alertCount || a.employeeName.localeCompare(b.employeeName));
+            return {
+                ulbKey: ulb.ulbKey,
+                ulbId: ulb.ulbId,
+                ulbName: ulb.ulbName,
+                alerts: ulb.alerts,
+                employees,
+                ...summarize(ulb.alerts),
+            };
+        })
+        .sort((a, b) => b.alertCount - a.alertCount || a.ulbName.localeCompare(b.ulbName));
 }

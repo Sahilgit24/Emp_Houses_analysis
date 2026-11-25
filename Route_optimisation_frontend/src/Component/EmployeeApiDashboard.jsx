@@ -5,12 +5,13 @@ import {
     getReportWindowDays,
     getHighPriorityAttentionHouses,
     getNextCollectionPriorities,
-    getCoverageTrend,
+    getWeeklyWindows,
     isEmployeeActiveOnDate,
     summarizeCollectionPatterns,
     summarizeDailyEmployeeReport,
+    summarizeWeeklyCoverageTrend,
+    WEEKLY_TREND_STABLE_BAND_PP,
 } from "../data/employeePerformance.js";
-import {API_URL} from "../config.js";
 import AnalysisHouseMapDialog from "./AnalysisHouseMapDialog.jsx";
 import {
     Activity,
@@ -18,8 +19,6 @@ import {
     ArrowRight,
     ArrowUpRight,
     CalendarDays,
-    Info,
-    TriangleAlert,
     CalendarCheck,
     CalendarClock,
     CalendarRange,
@@ -33,7 +32,6 @@ import {
     Percent,
     Radar,
     Repeat,
-    ShieldAlert,
     TrendingUp,
     UserCheck,
     UsersRound,
@@ -72,6 +70,49 @@ function addDays(date, days) {
     return Number.isFinite(timestamp)
         ? new Date(timestamp + days * 86400000).toISOString().slice(0, 10)
         : null;
+}
+
+// "+1.2 pp", "-0.8 pp", or "0.0 pp" for changes that round to zero (never "-0").
+function formatSignedPoints(value) {
+    if (Math.abs(value) < 0.05) return "0.0 pp";
+    return `${value > 0 ? "+" : "-"}${formatNumber(Math.abs(value), 1)} pp`;
+}
+
+function formatShortDate(value) {
+    return formatDate(value).replace(/\s\d{4}$/, "");
+}
+
+/** Vertical bars of weekly coverage; the latest week is highlighted, the dashed line is the earlier-weeks average. */
+function WeeklyCoverageBars({weeks, earlierAverage}) {
+    return (
+        <div
+            className="week-bars"
+            style={{"--week-count": weeks.length, "--avg": Number.isFinite(earlierAverage) ? earlierAverage : 0}}
+        >
+            {Number.isFinite(earlierAverage) && (
+                <span className="week-avg-line" aria-hidden="true">
+                    <span>Avg {formatNumber(earlierAverage, 1)}%</span>
+                </span>
+            )}
+            {weeks.map((week, index) => {
+                const latest = index === weeks.length - 1;
+                const measured = Number.isFinite(week.percent);
+                return (
+                    <div key={week.fromDate} className={`week-bar ${latest ? "is-latest" : ""}`}>
+                        <span className="week-bar-value">{measured ? `${formatNumber(week.percent, 1)}%` : "—"}</span>
+                        <div className="week-bar-track">
+                            <span
+                                className={`tone-${latest ? "teal" : "blue"}`}
+                                style={{height: `${measured ? Math.max(1.5, Math.min(100, week.percent)) : 0}%`}}
+                            />
+                        </div>
+                        <span className="week-bar-label">Week {index + 1}{latest ? " · latest" : ""}</span>
+                        <span className="week-bar-dates">{formatShortDate(week.fromDate)} – {formatShortDate(week.toDate)}</span>
+                    </div>
+                );
+            })}
+        </div>
+    );
 }
 
 /** Horizontal bars comparing two values that are already shown on the page. */
@@ -128,8 +169,6 @@ function PatternTile({icon: Icon, tone, title, value, share, total, className = 
     );
 }
 
-const SEVERITY_TONES = {High: "red", Medium: "amber", Low: "blue"};
-
 // Corner icon for each card, chosen from the card's existing label.
 const CARD_ICONS = [
     [/^Employees in ULB/, UsersRound],
@@ -145,8 +184,8 @@ const CARD_ICONS = [
     [/^Yesterday/, CalendarClock],
     [/^Houses collected/, Home],
     [/^Change vs/, TrendingUp],
-    [/^Previous matching/, History],
-    [/^Selected period/, CalendarRange],
+    [/^Latest week/, CalendarRange],
+    [/^Earlier weeks/, History],
     [/^Coverage change/, TrendingUp],
     [/^Direction/, ArrowUpRight],
 ];
@@ -266,7 +305,7 @@ function EmployeeAnalysisFilters({
                             value={employee.id}
                             style={{color: employee.isActiveToday ? "#15803d" : employee.isReportLoaded ? "#475569" : "#b45309"}}
                         >
-                            {employee.isActiveToday ? "●" : employee.isReportLoaded ? "○" : "◌"} {employee.name} · {employee.id} · {employee.activityStatus}{employee.isInactive ? " · Account inactive" : ""}
+                            {employee.isActiveToday ? "●" : employee.isReportLoaded ? "○" : "◌"} {employee.name} · {employee.id} · {employee.activityStatus}{employee.boundaryIssues.length ? " · Invalid Beat boundary" : ""}{employee.isInactive ? " · Account inactive" : ""}
                         </option>
                     ))}
                 </select>
@@ -290,9 +329,6 @@ export default function EmployeeApiDashboard({
 }) {
     const beats = useMemo(() => beatData?.beats || [], [beatData]);
     const [selectedEmployeeId, setSelectedEmployeeId] = useState(ALL_EMPLOYEES);
-    const [anomalyResult, setAnomalyResult] = useState(null);
-    const [anomalyLoading, setAnomalyLoading] = useState(false);
-    const [anomalyError, setAnomalyError] = useState("");
     const [houseMapDialog, setHouseMapDialog] = useState(null);
 
     const activityDate = appliedRange?.toDate ||
@@ -321,6 +357,7 @@ export default function EmployeeApiDashboard({
             id: String(employee.id),
             name: employee.name,
             isInactive: employee.isInactive,
+            hasBeat: employee.hasBeat,
         }])).values()].sort((a, b) => a.name.localeCompare(b.name));
         return uniqueEmployees.map((employee) => {
             const assignedBeats = beatsByEmployee.get(employee.id) || [];
@@ -333,6 +370,8 @@ export default function EmployeeApiDashboard({
                 isActiveToday,
                 activityStatus: isActiveToday
                     ? "Active today"
+                    : employee.hasBeat === false && !isReportLoaded
+                        ? "No Beat assigned"
                     : isLoading && !isReportLoaded
                         ? "Report loading"
                         : !activityDate
@@ -341,6 +380,7 @@ export default function EmployeeApiDashboard({
                             ? "No activity today"
                             : "Report unavailable",
                 beatNames: [...new Set(assignedBeats.map((item) => item.beatName).filter(Boolean))],
+                boundaryIssues: assignedBeats.flatMap((item) => item.geofenceIssues || []),
                 houseCount: assignedBeats.reduce((total, item) => total + (item.houses || []).length, 0),
                 gpsPointCount: assignedBeats.reduce((total, item) =>
                     total + (item.routes || [])
@@ -401,18 +441,6 @@ export default function EmployeeApiDashboard({
     const effectiveStartDate = selectedPeriodStart && dataStartDate > selectedPeriodStart
         ? dataStartDate
         : selectedPeriodStart || dataStartDate;
-    const historicalDataStartDate = useMemo(() => {
-        if (!beat) return effectiveEndDate;
-        const dates = [
-            beat.fromDate,
-            ...(beat.routes || []).map((route) => route.date),
-            ...(beat.houses || []).flatMap((house) => [
-                ...(house.history?.collectionDates || []),
-                house.scanningDate?.slice(0, 10),
-            ]),
-        ].filter(Boolean).sort();
-        return dates[0] || effectiveEndDate;
-    }, [beat, effectiveEndDate]);
     const analysisRoutes = useMemo(() => routes.filter((route) =>
         (!effectiveStartDate || route.date >= effectiveStartDate) &&
         (!effectiveEndDate || route.date <= effectiveEndDate)
@@ -445,38 +473,29 @@ export default function EmployeeApiDashboard({
             : null,
         [beat, effectiveEndDate],
     );
-    const previousWindowEndDate = addDays(effectiveStartDate, -1);
-    const previousWindowStartDate = reportWindowDays == null || !previousWindowEndDate
-        ? null
-        : addDays(previousWindowEndDate, -(reportWindowDays - 1));
-    const previousWindowIsAvailable = Boolean(previousWindowStartDate &&
-        previousWindowEndDate &&
-        previousWindowStartDate >= historicalDataStartDate &&
-        (!beat?.toDate || previousWindowEndDate <= beat.toDate));
-    const previousHouseCoverage = useMemo(() => {
-        if (!previousWindowIsAvailable || !beat) return null;
-        const previousRoutes = (beat.routes || []).filter((route) =>
-            route.date >= previousWindowStartDate && route.date <= previousWindowEndDate
-        );
-        return analyzeHouseCoverage(
-            beat.houses,
-            previousRoutes,
-            previousWindowStartDate,
-            previousWindowEndDate,
-            beat.assignedEmployee,
-            otherBeats,
-        );
-    }, [
-        beat,
-        otherBeats,
-        previousWindowEndDate,
-        previousWindowIsAvailable,
-        previousWindowStartDate,
-    ]);
-    const coverageTrend = useMemo(
-        () => getCoverageTrend(previousHouseCoverage, houseCoverage, beat?.houses.length || 0),
-        [beat, houseCoverage, previousHouseCoverage],
-    );
+    // Coverage for each full 7-day week of the selected period, oldest first.
+    const weeklyCoverage = useMemo(() => {
+        if (!beat || !effectiveStartDate || !effectiveEndDate) return [];
+        const totalHouseCount = beat.houses.length;
+        return getWeeklyWindows(effectiveStartDate, effectiveEndDate).map((week) => {
+            const weekRoutes = (beat.routes || []).filter((route) =>
+                route.date >= week.fromDate && route.date <= week.toDate
+            );
+            const coverage = analyzeHouseCoverage(
+                beat.houses,
+                weekRoutes,
+                week.fromDate,
+                week.toDate,
+                beat.assignedEmployee,
+                otherBeats,
+            );
+            return {
+                ...week,
+                percent: totalHouseCount > 0 ? coverage.collectedAtLeastOnce * 100 / totalHouseCount : null,
+            };
+        });
+    }, [beat, effectiveEndDate, effectiveStartDate, otherBeats]);
+    const weeklyTrend = useMemo(() => summarizeWeeklyCoverageTrend(weeklyCoverage), [weeklyCoverage]);
     const outsideBeatAnalysis = useMemo(
         () => analyzeOutsideBeatCollections(
             analysisRoutes,
@@ -508,128 +527,6 @@ export default function EmployeeApiDashboard({
         () => summarizeDailyEmployeeReport(historicalHouseCoverage, historicalRoutes, effectiveEndDate),
         [effectiveEndDate, historicalHouseCoverage, historicalRoutes],
     );
-    const historicalOutsideBeatAnalysis = useMemo(
-        () => analyzeOutsideBeatCollections(
-            historicalRoutes,
-            otherBeats,
-            beat?.assignedEmployee?.id,
-            null,
-            effectiveEndDate,
-        ),
-        [beat, effectiveEndDate, historicalRoutes, otherBeats],
-    );
-    const anomalyPayload = useMemo(() => {
-        if (!beat || !effectiveEndDate) return null;
-        const outsideHouseIdsByDate = new Map(
-            historicalOutsideBeatAnalysis.byDate.map(({date, houseIds}) => [date, houseIds]),
-        );
-        const routesByDate = new Map();
-        const assignedEmployeeId = String(beat.assignedEmployee?.id || "");
-        historicalRoutes.forEach((route) => {
-            const routeData = routesByDate.get(route.date) || {
-                hasRouteData: false,
-                hasRouteCollectionData: false,
-            };
-            routeData.hasRouteData = true;
-            routeData.hasRouteCollectionData = routeData.hasRouteCollectionData ||
-                Boolean(assignedEmployeeId && route.collectionScans.some((scan) =>
-                    String(scan.scannerUserId || assignedEmployeeId) === assignedEmployeeId
-                ));
-            routesByDate.set(route.date, routeData);
-        });
-        const activityDates = new Set(routesByDate.keys());
-        historicalHouseCoverage.details.forEach((detail) => {
-            detail.assignedCollectionDates.forEach((date) => activityDates.add(date));
-            detail.otherEmployeeCollectionDates.forEach((date) => activityDates.add(date));
-        });
-
-        return {
-            selected_date: effectiveEndDate,
-            total_houses: beat.houses.length,
-            daily_activity: [...activityDates].sort().map((date) => {
-                const assignedDetails = historicalHouseCoverage.details.filter((detail) =>
-                    detail.assignedCollectionDates.includes(date)
-                );
-                const otherHouseIds = historicalHouseCoverage.details
-                    .filter((detail) => detail.otherEmployeeCollectionDates.includes(date))
-                    .map((detail) => detail.house.houseId);
-                const routeData = routesByDate.get(date);
-                return {
-                    date,
-                    assigned_house_ids: assignedDetails.map((detail) => detail.house.houseId),
-                    other_house_ids: otherHouseIds,
-                    outside_beat_house_ids: outsideHouseIdsByDate.get(date) || [],
-                    assigned_house_coordinates: assignedDetails
-                        .filter((detail) =>
-                            Number.isFinite(detail.house.lat) &&
-                            Number.isFinite(detail.house.lon)
-                        )
-                        .map((detail) => ({
-                            lat: detail.house.lat,
-                            lon: detail.house.lon,
-                        })),
-                    has_activity_data: Boolean(
-                        routeData?.hasRouteData || assignedDetails.length || otherHouseIds.length
-                    ),
-                    has_route_collection_data: Boolean(routeData?.hasRouteCollectionData),
-                };
-            }),
-            house_patterns: historicalHouseCoverage.details.map((detail) => ({
-                house_id: detail.house.houseId,
-                collection_days: detail.collectionDays,
-                typical_interval_days: detail.typicalIntervalDays,
-                current_gap_days: detail.currentGapDays,
-                repeated_long_gaps: detail.repeatedLongGaps,
-                status: detail.status,
-            })),
-        };
-    }, [
-        beat,
-        effectiveEndDate,
-        historicalHouseCoverage,
-        historicalOutsideBeatAnalysis.byDate,
-        historicalRoutes,
-    ]);
-
-    useEffect(() => {
-        if (!anomalyPayload) {
-            setAnomalyResult(null);
-            setAnomalyError("");
-            setAnomalyLoading(false);
-            return undefined;
-        }
-
-        const controller = new AbortController();
-        setAnomalyResult(null);
-        setAnomalyError("");
-        setAnomalyLoading(true);
-        const loadAnomalies = async () => {
-            try {
-                const response = await fetch(`${API_URL}/analytics/employee-anomalies`, {
-                    method: "POST",
-                    headers: {"Content-Type": "application/json"},
-                    body: JSON.stringify(anomalyPayload),
-                    signal: controller.signal,
-                });
-                const result = await response.json();
-                if (!response.ok) {
-                    throw new Error(result.message || "The anomaly analysis request failed.");
-                }
-                if (result.status !== "success") {
-                    throw new Error("The anomaly analysis returned an invalid response.");
-                }
-                setAnomalyResult(result);
-            } catch (error) {
-                if (error.name !== "AbortError") {
-                    setAnomalyError(error.message || "Anomaly analysis is unavailable.");
-                }
-            } finally {
-                if (!controller.signal.aborted) setAnomalyLoading(false);
-            }
-        };
-        loadAnomalies();
-        return () => controller.abort();
-    }, [anomalyPayload]);
     const nextCollectionPriorities = useMemo(
         () => getNextCollectionPriorities(
             historicalHouseCoverage,
@@ -859,6 +756,14 @@ export default function EmployeeApiDashboard({
                                                     <span className={`status-pill tone-${employee.isActiveToday ? "emerald" : employee.isReportLoaded ? "slate" : "amber"}`}>
                                                         {employee.activityStatus}
                                                     </span>
+                                                    {employee.boundaryIssues.length > 0 && (
+                                                        <span
+                                                            className="status-pill tone-amber ml-1"
+                                                            title={`${employee.boundaryIssues.join(". ")}. The invalid part was ignored.`}
+                                                        >
+                                                            Invalid Beat boundary
+                                                        </span>
+                                                    )}
                                                 </td>
                                             </tr>
                                         );
@@ -959,6 +864,12 @@ export default function EmployeeApiDashboard({
                     <p className="mt-3 text-xs text-slate-500">
                         {beat.beatName} · {formatDate(effectiveStartDate)} to {formatDate(effectiveEndDate)} · {reportWindowLabel}
                     </p>
+                    {beat.geofenceIssues?.length > 0 && (
+                        <p role="note" className="mt-2 rounded border border-amber-300 bg-amber-50 p-2 text-xs text-amber-900">
+                            Invalid Beat boundary: {beat.geofenceIssues.join(". ")}. The invalid part was ignored
+                            {beat.fencePolygons.length ? "; the valid part of the boundary is used." : ", so inside/outside-Beat checks are unavailable for this Beat."}
+                        </p>
+                    )}
                 </header>
 
                 <section aria-labelledby="beat-status-heading" className="flex flex-col gap-3">
@@ -1305,78 +1216,63 @@ export default function EmployeeApiDashboard({
                     <div>
                         <h2 id="coverage-trend-heading" className="section-heading text-lg font-semibold text-slate-900"><SectionIcon icon={TrendingUp} tone="teal"/>Coverage Trend</h2>
                         <p className="mt-1 max-w-3xl text-sm leading-5 text-slate-600">
-                            See whether more or fewer houses were collected in this period than in the previous period of the same length. Coverage is the share of Beat houses scanned by you or another employee. A change of +5 percentage points means coverage went from, for example, 40% to 45%.
+                            Weekly coverage is the share of Beat houses scanned by you or another employee during each 7-day week of the selected period, ending on {formatDate(effectiveEndDate)}. The latest week is compared with the average of the earlier weeks; a change smaller than {WEEKLY_TREND_STABLE_BAND_PP} percentage point is treated as stable.
                         </p>
                     </div>
-                    <div className="insight-panel mt-3">
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                            <p className="insight-panel-title"><TrendingUp aria-hidden="true"/>Coverage</p>
-                            <DeltaBadge value={coverageTrend.changePercentagePoints}>
-                                {coverageTrend.changePercentagePoints == null
-                                    ? "Unavailable"
-                                    : `${coverageTrend.changePercentagePoints > 0 ? "+" : ""}${formatNumber(coverageTrend.changePercentagePoints, 1)} pp`}
-                            </DeltaBadge>
+                    {weeklyCoverage.length > 0 ? (
+                        <div className="insight-panel mt-3">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                                <p className="insight-panel-title"><TrendingUp aria-hidden="true"/>Weekly coverage</p>
+                                <DeltaBadge value={weeklyTrend.changePercentagePoints == null || Math.abs(weeklyTrend.changePercentagePoints) >= 0.05 ? weeklyTrend.changePercentagePoints : 0}>
+                                    {weeklyTrend.changePercentagePoints == null
+                                        ? "Needs two full weeks"
+                                        : `${formatSignedPoints(weeklyTrend.changePercentagePoints)} vs earlier weeks`}
+                                </DeltaBadge>
+                            </div>
+                            <WeeklyCoverageBars weeks={weeklyCoverage} earlierAverage={weeklyTrend.earlierAverage}/>
                         </div>
-                        <div className="mt-3">
-                            <ComparisonBars max={100} rows={[
-                                {
-                                    key: "previous",
-                                    label: "Previous matching period",
-                                    value: coverageTrend.previousPercent,
-                                    display: coverageTrend.previousPercent == null ? "Unavailable" : `${formatNumber(coverageTrend.previousPercent, 1)}%`,
-                                    tone: "slate",
-                                },
-                                {
-                                    key: "selected",
-                                    label: "Selected period",
-                                    value: coverageTrend.currentPercent,
-                                    display: coverageTrend.currentPercent == null ? "Unavailable" : `${formatNumber(coverageTrend.currentPercent, 1)}%`,
-                                    tone: "teal",
-                                },
-                            ]}/>
-                        </div>
-                    </div>
+                    ) : (
+                        <p role="status" className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
+                            The selected period is shorter than one full 7-day week, so weekly coverage cannot be shown. Choose a longer date range.
+                        </p>
+                    )}
                     <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                         <Card
-                            label="Previous matching period"
-                            value={coverageTrend.previousPercent == null
-                                ? "Unavailable"
-                                : `${formatNumber(coverageTrend.previousPercent, 1)}%`}
-                            detail={!previousWindowIsAvailable
-                                ? "Previous-period comparison unavailable for this reporting range."
-                                : previousWindowStartDate && previousWindowEndDate
-                                ? `${formatDate(previousWindowStartDate)} to ${formatDate(previousWindowEndDate)}`
-                                : "Previous-period comparison unavailable for this reporting range."}
+                            label="Latest week"
+                            value={weeklyTrend.latest ? `${formatNumber(weeklyTrend.latest.percent, 1)}%` : "Unavailable"}
+                            detail={weeklyTrend.latest
+                                ? `${formatDate(weeklyTrend.latest.fromDate)} to ${formatDate(weeklyTrend.latest.toDate)}`
+                                : "No full week in the selected period."}
+                            tone="text-teal-700"
                         />
                         <Card
-                            label="Selected period"
-                            value={coverageTrend.currentPercent == null
-                                ? "Unavailable"
-                                : `${formatNumber(coverageTrend.currentPercent, 1)}%`}
-                            detail={`${formatDate(effectiveStartDate)} to ${formatDate(effectiveEndDate)}`}
+                            label="Earlier weeks average"
+                            value={weeklyTrend.earlierAverage == null ? "Unavailable" : `${formatNumber(weeklyTrend.earlierAverage, 1)}%`}
+                            detail={weeklyTrend.earlierAverage == null
+                                ? "At least two full weeks are needed for a comparison."
+                                : `Average of the ${weeklyTrend.earlierWeekCount} week${weeklyTrend.earlierWeekCount === 1 ? "" : "s"} before the latest week.`}
                         />
                         <Card
                             label="Coverage change"
-                            value={coverageTrend.changePercentagePoints == null
+                            value={weeklyTrend.changePercentagePoints == null
                                 ? "Unavailable"
-                                : `${coverageTrend.changePercentagePoints > 0 ? "+" : ""}${formatNumber(coverageTrend.changePercentagePoints, 1)} pp`}
-                            detail={!previousWindowIsAvailable
-                                ? "Previous-period comparison unavailable for this reporting range."
-                                : "Difference in percentage points"}
+                                : formatSignedPoints(weeklyTrend.changePercentagePoints)}
+                            detail="Latest week minus the earlier-weeks average, in percentage points."
+                            tone={weeklyTrend.changePercentagePoints >= 0.05
+                                ? "text-green-700"
+                                : weeklyTrend.changePercentagePoints <= -0.05
+                                    ? "text-amber-700"
+                                    : "text-slate-900"}
                         />
                         <Card
                             label="Direction"
-                            value={coverageTrend.trend === "Insufficient data"
-                                ? "Unavailable"
-                                : coverageTrend.trend}
-                            detail={!previousWindowIsAvailable
-                                ? "Previous-period comparison unavailable for this reporting range."
-                                : coverageTrend.trend === "Insufficient data"
-                                    ? "Coverage data is unavailable for this comparison."
-                                    : "Based on the difference between the two coverage percentages."}
-                            tone={coverageTrend.trend === "Improving"
+                            value={weeklyTrend.trend === "Insufficient data" ? "Unavailable" : weeklyTrend.trend}
+                            detail={weeklyTrend.trend === "Insufficient data"
+                                ? "At least two full weeks are needed for a comparison."
+                                : `Stable means within ±${WEEKLY_TREND_STABLE_BAND_PP} percentage point of the earlier-weeks average.`}
+                            tone={weeklyTrend.trend === "Improving"
                                 ? "text-green-700"
-                                : coverageTrend.trend === "Declining"
+                                : weeklyTrend.trend === "Declining"
                                     ? "text-red-700"
                                     : "text-slate-900"}
                         />
@@ -1449,94 +1345,6 @@ export default function EmployeeApiDashboard({
                     </ul>
                 </section>
 
-                <section aria-labelledby="anomaly-detection-heading" className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-                    <div>
-                        <h2 id="anomaly-detection-heading" className="section-heading text-lg font-semibold text-slate-900"><SectionIcon icon={ShieldAlert} tone="red"/>
-                            Anomaly Detection
-                        </h2>
-                        <p className="mt-1 max-w-3xl text-sm leading-5 text-slate-600">
-                            Checks for unusual recorded patterns. Daily house counts are compared with the previous calendar day; other checks use recent activity or each house’s scan history. An alert is a signal to review, not proof of misconduct.
-                        </p>
-                    </div>
-                    {anomalyLoading && (
-                        <p role="status" className="mt-3 text-sm text-slate-600">
-                            Comparing recorded activity with historical patterns…
-                        </p>
-                    )}
-                    {anomalyError && (
-                        <p role="alert" className="mt-3 rounded border border-red-300 bg-red-50 p-3 text-sm text-red-800">
-                            Anomaly analysis is unavailable: {anomalyError}
-                        </p>
-                    )}
-                    {anomalyResult && (
-                        <>
-                            {anomalyResult.anomalies.length > 0 && (
-                                <div className="mt-3 flex flex-wrap gap-2" aria-hidden="true">
-                                    {["High", "Medium", "Low"].map((level) => {
-                                        const count = anomalyResult.anomalies.filter((anomaly) => anomaly.severity === level).length;
-                                        return (
-                                            <span key={level} className={`severity-chip tone-${SEVERITY_TONES[level]} ${count ? "" : "is-empty"}`}>
-                                                <TriangleAlert/>
-                                                {level}
-                                                <strong>{count}</strong>
-                                            </span>
-                                        );
-                                    })}
-                                </div>
-                            )}
-                            {anomalyResult.anomalies.length === 0 && anomalyResult.insufficient_data.length === 0 && (
-                                <p className="mt-3 rounded border border-slate-200 bg-slate-50 p-3 text-sm font-medium text-slate-700">
-                                    No significant anomalies detected.
-                                </p>
-                            )}
-                            {anomalyResult.insufficient_data.length > 0 && (
-                                <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50/70 p-4 text-sm text-amber-900">
-                                    <p className="flex items-center gap-2 font-semibold"><Info className="h-4 w-4" aria-hidden="true"/>Some checks could not be completed:</p>
-                                    <ul className="mt-2 grid gap-2">
-                                        {anomalyResult.insufficient_data.map((reason) => (
-                                            <li key={reason} className="rounded-lg bg-white/70 px-3 py-2 text-amber-950 shadow-[inset_0_0_0_1px_rgb(253_230_138)]">{reason}</li>
-                                        ))}
-                                    </ul>
-                                </div>
-                            )}
-                            {anomalyResult.anomalies.length > 0 && (
-                                <div className="mt-3 overflow-auto rounded-xl border border-slate-200">
-                                    <table className="w-full min-w-[900px] text-left text-sm">
-                                        <thead className="bg-slate-50 text-xs font-semibold text-slate-600">
-                                            <tr>
-                                                <th className="p-3">What looks unusual</th>
-                                                <th className="p-3">What happened</th>
-                                                <th className="p-3">What is typical for comparison</th>
-                                                <th className="p-3">Severity</th>
-                                                <th className="p-3">Why it is flagged</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {anomalyResult.anomalies.map((anomaly) => (
-                                                <tr key={anomaly.type} className={`anomaly-row tone-${SEVERITY_TONES[anomaly.severity] || "slate"} border-t border-slate-100 align-top`}>
-                                                    <td className="p-3 font-medium text-slate-900">
-                                                        <span className="flex items-start gap-2">
-                                                            <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-[var(--tone)]" aria-hidden="true"/>
-                                                            {anomaly.type}
-                                                        </span>
-                                                    </td>
-                                                    <td className="p-3 text-slate-700">{anomaly.current_pattern}</td>
-                                                    <td className="p-3 text-slate-700">{anomaly.normal_pattern}</td>
-                                                    <td className="p-3">
-                                                        <span className={`status-pill tone-${SEVERITY_TONES[anomaly.severity] || "slate"}`}>
-                                                            {anomaly.severity}
-                                                        </span>
-                                                    </td>
-                                                    <td className="p-3 text-slate-700">{anomaly.reason}</td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                </div>
-                            )}
-                        </>
-                    )}
-                </section>
                 <AnalysisHouseMapDialog
                     open={Boolean(houseMapDialog)}
                     onOpenChange={(open) => {

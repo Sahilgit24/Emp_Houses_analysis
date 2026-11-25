@@ -1,3 +1,4 @@
 /.idea/
 /.venv/
 /osrm/data/
+/data/live_all_ulb.sqlite3*

@@ -149,9 +149,18 @@ export function analyzeOutsideBeatCollections(routes, otherBeats, assignedEmploy
         });
     });
 
+    const addHouse = (beat, house, date) => {
+        const houses = housesByBeat.get(beat.id) || new Set();
+        houses.add(house.houseId);
+        housesByBeat.set(beat.id, houses);
+        const dateHouses = housesByDate.get(date) || new Set();
+        dateHouses.add(house.houseId);
+        housesByDate.set(date, dateHouses);
+    };
+
     routes.forEach((route) => {
         if (!dateInWindow(route.date, fromDate, toDate)) return;
-        route.collectionScans.forEach((scan) => {
+        (route.collectionScans || []).forEach((scan) => {
             if (String(scan.scannerUserId || assignedEmployeeId || "") !== String(assignedEmployeeId || "") ||
                 !assignedEmployeeId || scan.houseId) return;
             const matches = scan.plateId ? housesByReference.get(scan.plateId) || [] : [];
@@ -160,14 +169,24 @@ export function analyzeOutsideBeatCollections(routes, otherBeats, assignedEmploy
                 return;
             }
             const {beat, house} = matches[0];
-            const houses = housesByBeat.get(beat.id) || new Set();
-            houses.add(house.houseId);
-            housesByBeat.set(beat.id, houses);
-            const dateHouses = housesByDate.get(route.date) || new Set();
-            dateHouses.add(house.houseId);
-            housesByDate.set(route.date, dateHouses);
+            addHouse(beat, house, route.date);
         });
     });
+
+    // The report API records scans on the houses of the Beat that was collected (house history with
+    // the scanner's user ID), not in the collecting employee's own route. Read them from there too,
+    // the same way Employee Alerts does.
+    if (assignedEmployeeId) {
+        otherBeats.forEach((beat) => {
+            (beat.houses || []).forEach((house) => {
+                (house.historyEvents || []).forEach((event) => {
+                    if (String(event.scannerUserId || "") !== String(assignedEmployeeId) ||
+                        !dateInWindow(event.date, fromDate, toDate)) return;
+                    addHouse(beat, house, event.date);
+                });
+            });
+        });
+    }
 
     const byBeat = [...housesByBeat.entries()].map(([beatId, houseIds]) => {
         const beat = otherBeats.find((item) => item.id === beatId);
@@ -508,6 +527,58 @@ export function getNextCollectionPriorities(coverage, endDate) {
 
 export function getHighPriorityAttentionHouses(attentionHouses) {
     return attentionHouses.filter((item) => item.priorityRank >= 3);
+}
+
+// A change smaller than this many percentage points is reported as "Stable".
+export const WEEKLY_TREND_STABLE_BAND_PP = 1;
+
+/**
+ * Splits a date range into full 7-day weeks that end on endDate, oldest first.
+ * A partial week at the start of the range is left out so every week is the same length.
+ */
+export function getWeeklyWindows(startDate, endDate, maxWeeks = 4) {
+    if (!startDate || !endDate || startDate > endDate) return [];
+    const weeks = [];
+    let weekEnd = endDate;
+    while (weeks.length < maxWeeks) {
+        const weekStart = addDays(weekEnd, -6);
+        if (!weekStart || weekStart < startDate) break;
+        weeks.unshift({fromDate: weekStart, toDate: weekEnd});
+        weekEnd = addDays(weekStart, -1);
+    }
+    return weeks;
+}
+
+/**
+ * Compares the latest week's coverage with the average of the earlier weeks.
+ * weeks: [{fromDate, toDate, percent}] oldest first; percent may be null when unavailable.
+ */
+export function summarizeWeeklyCoverageTrend(weeks) {
+    const measured = (weeks || []).filter((week) => Number.isFinite(week.percent));
+    if (measured.length < 2) {
+        return {
+            latest: measured.at(-1) || null,
+            earlierAverage: null,
+            earlierWeekCount: 0,
+            changePercentagePoints: null,
+            trend: "Insufficient data",
+        };
+    }
+    const latest = measured.at(-1);
+    const earlier = measured.slice(0, -1);
+    const earlierAverage = earlier.reduce((total, week) => total + week.percent, 0) / earlier.length;
+    const changePercentagePoints = latest.percent - earlierAverage;
+    return {
+        latest,
+        earlierAverage,
+        earlierWeekCount: earlier.length,
+        changePercentagePoints,
+        trend: Math.abs(changePercentagePoints) < WEEKLY_TREND_STABLE_BAND_PP
+            ? "Stable"
+            : changePercentagePoints > 0
+                ? "Improving"
+                : "Declining",
+    };
 }
 
 export function getCoverageTrend(previousCoverage, currentCoverage, totalHouses) {

@@ -8,6 +8,7 @@ import {ALL_ULBS, useWeightCollectionData} from "./hooks/useWeightCollectionData
 
 // Each tab's code is downloaded the first time the tab is opened.
 const ExecutiveOverview = lazy(() => import("./Component/ExecutiveOverview"));
+const AllUlbLiveOverview = lazy(() => import("./Component/AllUlbLiveOverview.jsx"));
 const BeatHouseRoutePlanner = lazy(() => import("./Component/Map/BeatHouseRoutePlanner"));
 const EmployeeApiDashboard = lazy(() => import("./Component/EmployeeApiDashboard"));
 const EmployeeAlerts = lazy(() => import("./Component/EmployeeAlerts.jsx"));
@@ -22,7 +23,7 @@ export default function App() {
         ulbs,
         selectedUlbId,
         employeeList,
-        ulbEmployeeErrors,
+        liveAllUlb,
         dateSelection,
         appliedRange,
         loadedSources,
@@ -63,14 +64,14 @@ export default function App() {
             <div className="app-workspace flex min-h-0 min-w-0 flex-1 flex-col">
                 <FilterBar data={data} onSelectAllUlbs={() => selectTab("overview")}/>
                 <main className="min-h-0 flex-1">
-                    {renderTab("overview", (
+                    {renderTab("overview", selectedUlbId === ALL_ULBS ? (
+                        <AllUlbLiveOverview live={liveAllUlb} liveDate={liveTodayDate}/>
+                    ) : (
                         <ExecutiveOverview
                             ulbs={ulbs}
                             selectedUlbId={selectedUlbId}
                             sources={loadedSources}
                             employeeListsByUlb={employeeListsByUlb}
-                            liveDate={liveTodayDate}
-                            ulbEmployeeErrors={ulbEmployeeErrors}
                             reportErrors={reportErrors}
                             isLoading={employeeListLoading || reportLoading}
                             dateSelection={dateSelection}

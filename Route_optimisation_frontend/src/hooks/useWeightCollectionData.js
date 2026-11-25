@@ -1,30 +1,34 @@
 import {useEffect, useMemo, useState} from "react";
 import {combineNormalizedBeatData} from "../data/beatApiData.js";
 import {getTodayInTimeZone} from "../data/executiveOverview.js";
+import {fetchLiveAllUlbSummary, requestLiveAllUlbRefresh} from "../data/liveAllUlbApi.js";
 import {
     clearWeightApiCache,
-    fetchEmployeeReportsAcrossUlbs,
     fetchEmployeeReports,
     fetchEmployeesForUlb,
-    fetchEmployeesForUlbs,
     fetchUlbDirectory,
 } from "../data/weightCollectionApi.js";
 
 export const LIVE_DATE = "live";
 export const ALL_ULBS = "all";
 
+// While the backend is building today's All-ULB snapshot the summary is polled more often.
+const LIVE_POLL_BUSY_MS = 15000;
+const LIVE_POLL_IDLE_MS = 60000;
+const EMPTY_LIVE_STATE = {data: null, error: "", refreshError: "", loading: false};
+
 /**
  * Loads the ULB directory, the selected ULB's employees and their Beat reports, and owns the
- * shared date / date-range selection used by every tab.
+ * shared date / date-range selection used by every tab. "All ULBs" reads the backend's
+ * live-date snapshot instead of downloading every employee report.
  */
 export function useWeightCollectionData() {
     const [beatData, setBeatData] = useState(null);
     const [ulbs, setUlbs] = useState([]);
     const [selectedUlbId, setSelectedUlbId] = useState("");
     const [employeeList, setEmployeeList] = useState(null);
-    const [allEmployeeListsByUlb, setAllEmployeeListsByUlb] = useState({});
-    const [ulbEmployeeErrors, setUlbEmployeeErrors] = useState([]);
-    const [employeeListProgress, setEmployeeListProgress] = useState({completed: 0, total: 0});
+    const [liveAllUlb, setLiveAllUlb] = useState(EMPTY_LIVE_STATE);
+    const [liveReloadKey, setLiveReloadKey] = useState(0);
     const [dateSelection, setDateSelection] = useState(LIVE_DATE);
     const [rangeFromDate, setRangeFromDate] = useState("");
     const [rangeToDate, setRangeToDate] = useState("");
@@ -68,9 +72,6 @@ export function useWeightCollectionData() {
     useEffect(() => {
         if (!selectedUlbId) {
             setEmployeeList(null);
-            setAllEmployeeListsByUlb({});
-            setUlbEmployeeErrors([]);
-            setEmployeeListProgress({completed: 0, total: 0});
             setLoadedSources([]);
             setBeatData(null);
             setReportProgress({completed: 0, total: 0});
@@ -89,9 +90,6 @@ export function useWeightCollectionData() {
         const controller = new AbortController();
         const loadSelectedUlb = async () => {
             setEmployeeList(null);
-            setAllEmployeeListsByUlb({});
-            setUlbEmployeeErrors([]);
-            setEmployeeListProgress({completed: 0, total: 0});
             setLoadedSources([]);
             setBeatData(null);
             setReportProgress({completed: 0, total: 0});
@@ -105,51 +103,8 @@ export function useWeightCollectionData() {
             setEmployeeListLoading(true);
             setReportLoading(false);
             try {
-                if (selectedUlbId === ALL_ULBS) {
-                    if (!ulbs.length) {
-                        throw new Error("The ULB list is empty; refresh the ULB list before loading all-ULB monitoring.");
-                    }
-
-                    setEmployeeListProgress({completed: 0, total: ulbs.length});
-                    const {employeeListsByUlb: allEmployeeLists, errors: employeeErrors} =
-                        await fetchEmployeesForUlbs(ulbs, {
-                            signal: controller.signal,
-                            onProgress: setEmployeeListProgress,
-                        });
-                    if (controller.signal.aborted) return;
-                    setAllEmployeeListsByUlb(allEmployeeLists);
-                    setUlbEmployeeErrors(employeeErrors);
-                    setEmployeeListLoading(false);
-
-                    const employeeTargets = ulbs.flatMap((ulb) =>
-                        (allEmployeeLists[ulb.id]?.employees || []).map((employee) => ({
-                            ulbId: ulb.id,
-                            ulbName: ulb.name,
-                            appId: ulb.id,
-                            employee,
-                        }))
-                    );
-                    setReportProgress({completed: 0, total: employeeTargets.length});
-                    if (!employeeTargets.length) return;
-
-                    setReportLoading(true);
-                    const {reports, errors: reportErrors} = await fetchEmployeeReportsAcrossUlbs(
-                        employeeTargets,
-                        {signal: controller.signal, onProgress: setReportProgress},
-                    );
-                    if (controller.signal.aborted) return;
-                    const sources = reports.map(({ulbId, ulbName, employee, data}) => ({
-                        fileName: `${employee.name} (${employee.id})`,
-                        employeeId: String(employee.id),
-                        ulbId,
-                        ulbName,
-                        data: {...data, sourceName: `${employee.name} (${employee.id})`},
-                    }));
-                    setLoadedSources(sources);
-                    setBeatData(null);
-                    setReportErrors(reportErrors);
-                    return;
-                }
+                // All ULBs: the live summary effect below reads the backend snapshot.
+                if (selectedUlbId === ALL_ULBS) return;
 
                 const employees = await fetchEmployeesForUlb(selectedUlbId, {
                     signal: controller.signal,
@@ -157,12 +112,14 @@ export function useWeightCollectionData() {
                 if (controller.signal.aborted) return;
                 const normalizedEmployeeList = {employees};
                 setEmployeeList(normalizedEmployeeList);
-                setReportProgress({completed: 0, total: employees.length});
+                // Only employees with a Beat have house records, so only their reports are downloaded.
+                const reportEmployees = employees.filter((employee) => employee.hasBeat !== false);
+                setReportProgress({completed: 0, total: reportEmployees.length});
                 setEmployeeListLoading(false);
-                if (!employees.length) return;
+                if (!reportEmployees.length) return;
 
                 setReportLoading(true);
-                const {reports, errors} = await fetchEmployeeReports(selectedUlbId, employees, {
+                const {reports, errors} = await fetchEmployeeReports(selectedUlbId, reportEmployees, {
                     signal: controller.signal,
                     onProgress: setReportProgress,
                 });
@@ -198,6 +155,38 @@ export function useWeightCollectionData() {
         return () => controller.abort();
     }, [dataReloadKey, selectedUlbId, ulbs]);
 
+    useEffect(() => {
+        if (selectedUlbId !== ALL_ULBS) {
+            setLiveAllUlb(EMPTY_LIVE_STATE);
+            return undefined;
+        }
+        const controller = new AbortController();
+        let timer;
+        const load = async (first) => {
+            if (first) setLiveAllUlb((current) => ({...current, loading: true, error: ""}));
+            let busy = true;
+            try {
+                const summary = await fetchLiveAllUlbSummary({signal: controller.signal});
+                if (controller.signal.aborted) return;
+                setLiveAllUlb((current) => ({...current, data: summary, error: "", loading: false}));
+                busy = summary.enabled !== false && (summary.refreshing || !summary.snapshot?.complete);
+            } catch (error) {
+                if (controller.signal.aborted) return;
+                setLiveAllUlb((current) => ({
+                    ...current,
+                    loading: false,
+                    error: error instanceof Error ? error.message : "Could not load All-ULB live data.",
+                }));
+            }
+            timer = setTimeout(() => load(false), busy ? LIVE_POLL_BUSY_MS : LIVE_POLL_IDLE_MS);
+        };
+        load(true);
+        return () => {
+            controller.abort();
+            clearTimeout(timer);
+        };
+    }, [liveReloadKey, selectedUlbId]);
+
     const availableDates = useMemo(() => {
         const dates = new Set();
         (beatData?.beats || []).forEach((beat) => {
@@ -229,12 +218,12 @@ export function useWeightCollectionData() {
             (current.fromDate < firstDate || current.toDate > lastDate) ? null : current
         );
     }, [availableDates]);
-    const employeeListsByUlb = useMemo(() => {
-        if (selectedUlbId === ALL_ULBS) return allEmployeeListsByUlb;
-        return selectedUlbId && employeeList
+    const employeeListsByUlb = useMemo(
+        () => selectedUlbId && selectedUlbId !== ALL_ULBS && employeeList
             ? {[selectedUlbId]: employeeList}
-            : {};
-    }, [allEmployeeListsByUlb, employeeList, selectedUlbId]);
+            : {},
+        [employeeList, selectedUlbId],
+    );
     const loadedEmployeeIds = useMemo(
         () => loadedSources.map((source) => source.employeeId).filter(Boolean),
         [loadedSources],
@@ -243,10 +232,8 @@ export function useWeightCollectionData() {
         (total, list) => total + list.employees.length,
         0,
     );
-    const visibleUlbEmployeeErrors = ulbEmployeeErrors.slice(0, 50);
-    const visibleReportErrors = reportErrors.slice(0, Math.max(0, 50 - visibleUlbEmployeeErrors.length));
-    const hiddenRequestErrorCount = ulbEmployeeErrors.length + reportErrors.length -
-        visibleUlbEmployeeErrors.length - visibleReportErrors.length;
+    const visibleReportErrors = reportErrors.slice(0, 50);
+    const hiddenRequestErrorCount = reportErrors.length - visibleReportErrors.length;
     const liveTodayDate = getTodayInTimeZone("Asia/Kolkata");
     const latestAvailableDate = availableDates.at(-1) || "";
     const calendarDateValue = dateSelection === LIVE_DATE
@@ -278,7 +265,23 @@ export function useWeightCollectionData() {
         clearWeightApiCache();
         setUlbReloadKey((key) => key + 1);
     };
-    const refreshData = () => {
+    const refreshData = async () => {
+        if (selectedUlbId === ALL_ULBS) {
+            // Ask the backend to rebuild today's snapshot now, then poll for its progress.
+            // A refusal (for example, live loading switched off) stays visible until the next attempt.
+            try {
+                await requestLiveAllUlbRefresh();
+            } catch (error) {
+                setLiveAllUlb((current) => ({
+                    ...current,
+                    refreshError: error instanceof Error ? error.message : "Could not start a live refresh.",
+                }));
+                return;
+            }
+            setLiveAllUlb((current) => ({...current, refreshError: ""}));
+            setLiveReloadKey((key) => key + 1);
+            return;
+        }
         clearWeightApiCache();
         setDataReloadKey((key) => key + 1);
     };
@@ -289,8 +292,7 @@ export function useWeightCollectionData() {
         selectedUlbId,
         setSelectedUlbId,
         employeeList,
-        ulbEmployeeErrors,
-        employeeListProgress,
+        liveAllUlb,
         dateSelection,
         rangeFromDate,
         setRangeFromDate,
@@ -311,7 +313,6 @@ export function useWeightCollectionData() {
         employeeListsByUlb,
         loadedEmployeeIds,
         listedEmployeeCount,
-        visibleUlbEmployeeErrors,
         visibleReportErrors,
         hiddenRequestErrorCount,
         liveTodayDate,

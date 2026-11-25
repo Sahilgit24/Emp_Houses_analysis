@@ -35,6 +35,11 @@ export function normalizeEmployeeList(payload) {
             .map(employeeId)
             .filter(Boolean),
     );
+    // Employees listed in AllBeats have a Beat. Only their reports contain house records, so the
+    // others' reports are not downloaded. Without an AllBeats list, hasBeat is left unset (unknown).
+    const beatEmployeeIds = Array.isArray(payload.AllBeats) && payload.AllUsers
+        ? new Set(payload.AllBeats.map(employeeId).filter(Boolean))
+        : null;
     const employeesById = new Map();
     records.forEach((record, index) => {
         const id = employeeId(record);
@@ -55,6 +60,7 @@ export function normalizeEmployeeList(payload) {
             id,
             name,
             ...(isInactive == null ? {} : {isInactive}),
+            ...(beatEmployeeIds ? {hasBeat: beatEmployeeIds.has(id)} : {}),
         });
     });
     return [...employeesById.values()].sort((a, b) => a.name.localeCompare(b.name));

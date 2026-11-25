@@ -60,27 +60,46 @@ export function beatHasHouseRecords(beat) {
     return (beat.houses || []).length > 0;
 }
 
+// Parses a Beat boundary into polygons. A boundary piece that is not a real area (fewer than three
+// points, or an unreadable coordinate) is skipped and described in `issues`, so the employee's
+// report still loads and the list can mark the Beat as having an invalid boundary.
 function parseGeofence(value, label) {
+    const issues = [];
+    const readPolygon = (points, readPoint, pieceLabel) => {
+        try {
+            const polygon = points.map(readPoint);
+            if (polygon.length < 3) {
+                issues.push(`${pieceLabel} has ${polygon.length} point${polygon.length === 1 ? "" : "s"}; at least three are needed`);
+                return null;
+            }
+            return polygon;
+        } catch (error) {
+            issues.push(`${pieceLabel}: ${error.message}`);
+            return null;
+        }
+    };
+
     if (Array.isArray(value)) {
-        const polygon = value.map((point, index) => {
+        const polygon = readPolygon(value, (point, index) => {
             if (!Array.isArray(point) || point.length < 2) {
-                throw new Error(`${label} has an invalid coordinate at item ${index + 1}.`);
+                throw new Error(`invalid coordinate at item ${index + 1}`);
             }
             const {lat, lon} = parseCoordinate(point[0], point[1], `${label} item ${index + 1}`);
             return [lat, lon];
-        });
-        if (polygon.length < 3) throw new Error(`${label} must contain at least three coordinates.`);
-        return [polygon];
+        }, label);
+        return {polygons: polygon ? [polygon] : [], issues};
     }
 
     if (typeof value !== "string" || !value.trim()) {
-        throw new Error(`${label} is missing.`);
+        return {polygons: [], issues: [`${label} is missing`]};
     }
-    const polygons = value.split(":").map((polygonText, polygonIndex) => {
-        const polygon = polygonText.split(";").map((pair, pointIndex) => {
+    const pieces = value.split(":");
+    const polygons = pieces.map((polygonText, polygonIndex) => readPolygon(
+        polygonText.split(";").filter((pair) => pair.trim()),
+        (pair, pointIndex) => {
             const parts = pair.split(",").map((part) => part.trim());
             if (parts.length !== 2) {
-                throw new Error(`${label} has an invalid coordinate at polygon ${polygonIndex + 1}, point ${pointIndex + 1}.`);
+                throw new Error(`invalid coordinate at point ${pointIndex + 1}`);
             }
             const {lat, lon} = parseCoordinate(
                 parts[0],
@@ -88,13 +107,10 @@ function parseGeofence(value, label) {
                 `${label} polygon ${polygonIndex + 1}, point ${pointIndex + 1}`,
             );
             return [lat, lon];
-        });
-        if (polygon.length < 3) {
-            throw new Error(`${label} polygon ${polygonIndex + 1} must contain at least three coordinates.`);
-        }
-        return polygon;
-    });
-    return polygons;
+        },
+        pieces.length > 1 ? `${label} polygon ${polygonIndex + 1}` : label,
+    )).filter(Boolean);
+    return {polygons, issues};
 }
 
 function haversineDistanceKm(from, to) {
@@ -262,9 +278,9 @@ function normalizeBeat(report, routeDetails, index) {
     const hasGeofence = typeof rawGeofence === "string"
         ? Boolean(rawGeofence.trim())
         : Array.isArray(rawGeofence) && rawGeofence.length > 0;
-    const fencePolygons = !hasGeofence && !hasReportedHouses
-        ? []
-        : parseGeofence(rawGeofence, `Beat ${beatId} geofence`);
+    const {polygons: fencePolygons, issues: geofenceIssues} = !hasGeofence && !hasReportedHouses
+        ? {polygons: [], issues: []}
+        : parseGeofence(rawGeofence, "Beat boundary");
     const fencePoints = fencePolygons[0] || [];
     const routeHouseCoordinates = [];
     const routeCoordinateKeys = new Set();
@@ -422,6 +438,8 @@ function normalizeBeat(report, routeDetails, index) {
         geofence: rawGeofence,
         fencePoints,
         fencePolygons,
+        // Problems with the boundary from the API; invalid pieces were skipped. Empty when valid.
+        geofenceIssues,
         houses,
         routeHouseCoordinates,
         routeCoordinateKeys: [...routeCoordinateKeys],
