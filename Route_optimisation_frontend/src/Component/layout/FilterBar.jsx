@@ -1,4 +1,4 @@
-import {useState} from "react";
+import {useEffect, useState} from "react";
 import {CalendarRange, ChevronDown, RefreshCw, SlidersHorizontal} from "lucide-react";
 import {ALL_ULBS, LIVE_DATE} from "@/hooks/useWeightCollectionData.js";
 
@@ -7,6 +7,94 @@ function formatTime(value) {
     return Number.isFinite(time)
         ? new Date(time).toLocaleTimeString("en-IN", {hour: "2-digit", minute: "2-digit", timeZone: "Asia/Kolkata"})
         : "";
+}
+
+function formatClock(value) {
+    const time = Date.parse(value || "");
+    return Number.isFinite(time)
+        ? new Date(time).toLocaleTimeString("en-IN", {
+            hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "Asia/Kolkata",
+        })
+        : "";
+}
+
+function formatAge(value, now) {
+    const time = Date.parse(value || "");
+    if (!Number.isFinite(time)) return "";
+    const seconds = Math.max(0, Math.round((now - time) / 1000));
+    if (seconds < 60) return "just now";
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes} min ago`;
+    const hours = Math.floor(minutes / 60);
+    return `${hours} h ${minutes % 60} min ago`;
+}
+
+// "Updated 10:42:15 am IST · 3 min ago" beside the refresh buttons; the age keeps counting.
+function DataFreshness({fetchedAt, refreshing, refreshStartedAt, label}) {
+    const [now, setNow] = useState(() => Date.now());
+    useEffect(() => {
+        const timer = setInterval(() => setNow(Date.now()), 15000);
+        return () => clearInterval(timer);
+    }, []);
+    if (refreshing) {
+        return (
+            <span className="text-xs text-slate-500" aria-live="polite">
+                Refreshing{refreshStartedAt ? ` · started ${formatClock(refreshStartedAt)} IST` : "…"}
+            </span>
+        );
+    }
+    if (!fetchedAt) return null;
+    const ageMinutes = (now - Date.parse(fetchedAt)) / 60000;
+    return (
+        <span
+            className={`text-xs ${ageMinutes >= 15 ? "font-medium text-amber-700" : "text-slate-500"}`}
+            title={new Date(fetchedAt).toLocaleString("en-IN", {timeZone: "Asia/Kolkata"})}
+            aria-live="polite"
+        >
+            {label} <span className="tabular-nums">{formatClock(fetchedAt)}</span> IST · {formatAge(fetchedAt, now)}
+        </span>
+    );
+}
+
+function formatDuration(seconds) {
+    if (seconds == null || !Number.isFinite(seconds)) return "";
+    const total = Math.max(0, Math.round(seconds));
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const rest = total % 60;
+    if (hours) return `${hours} h ${minutes} min`;
+    if (minutes) return `${minutes} min ${rest} s`;
+    return `${rest} s`;
+}
+
+/** How long the All-ULB refresh takes: live while it runs, then the totals of the last full refresh. */
+function RefreshTiming({progress, snapshot}) {
+    const running = progress?.timing;
+    const finished = !running && snapshot?.complete ? snapshot.timing : null;
+    const timing = running || finished;
+    if (!timing) return null;
+    const parts = running
+        ? [
+            `Started ${formatTime(timing.startedAt)}`,
+            `running for ${formatDuration(timing.elapsedSeconds)}`,
+        ]
+        : [
+            `Last full refresh ${formatTime(timing.startedAt)} to ${formatTime(timing.finishedAt)}`,
+            `took ${formatDuration(timing.elapsedSeconds)}`,
+        ];
+    if (timing.employeeListsSeconds != null) {
+        parts.push(`employee lists ${formatDuration(timing.employeeListsSeconds)}`);
+    }
+    parts.push(timing.ulbStatusSeconds != null
+        ? `every ULB active/inactive after ${formatDuration(timing.ulbStatusSeconds)}`
+        : "ULB statuses still being checked");
+    if (timing.reportsPerMinute) parts.push(`${timing.reportsPerMinute.toLocaleString()} reports/min`);
+    if (running && timing.remainingSeconds != null) parts.push(`about ${formatDuration(timing.remainingSeconds)} left`);
+    return (
+        <p className="mt-1 text-xs text-slate-500" aria-label="All-ULB refresh timing">
+            ⏱ {parts.join(" · ")}
+        </p>
+    );
 }
 
 /** Status line for the All-ULB view, which reads the backend's live-date snapshot. */
@@ -38,7 +126,9 @@ function LiveAllUlbStatus({live}) {
             {snapshot ? (
                 <p role="status">
                     {snapshot.complete
-                        ? `Live data for ${snapshot.liveDate}, updated ${formatTime(snapshot.generatedAt)} IST · ${snapshot.totals.loadedReports.toLocaleString()} employee reports across ${snapshot.totals.ulbs.toLocaleString()} ULBs. Updates every ${summary.refreshMinutes} minutes.`
+                        ? snapshot.mode === "status"
+                            ? `ULB status for ${snapshot.liveDate}, updated ${formatTime(snapshot.generatedAt)} IST: ${snapshot.totals.activeUlbs.toLocaleString()} active, ${snapshot.totals.inactiveUlbs.toLocaleString()} inactive of ${snapshot.totals.ulbs.toLocaleString()} ULBs. Updates every ${summary.refreshMinutes} minutes.`
+                            : `Live data for ${snapshot.liveDate}, updated ${formatTime(snapshot.generatedAt)} IST · ${snapshot.totals.loadedReports.toLocaleString()} employee reports across ${snapshot.totals.ulbs.toLocaleString()} ULBs. Updates every ${summary.refreshMinutes} minutes.`
                         : `Checking today's ULB activity: ${snapshot.totals.activeUlbs.toLocaleString()} active, ${snapshot.totals.inactiveUlbs.toLocaleString()} inactive, ${(snapshot.totals.checkingUlbs ?? snapshot.totals.pendingUlbs).toLocaleString()} still being checked${snapshot.totals.incompleteUlbs ? `, ${snapshot.totals.incompleteUlbs.toLocaleString()} unavailable or partial` : ""}.`}
                     {summary.stale && ` This snapshot is from ${snapshot.liveDate}; today's data is being prepared.`}
                     {refreshText && ` ${refreshText}`}
@@ -48,6 +138,12 @@ function LiveAllUlbStatus({live}) {
             )}
             {live.error && <p role="alert" className="text-amber-800">{live.error}</p>}
             {live.refreshError && <p role="alert" className="text-amber-800">{live.refreshError}</p>}
+            {summary.lastError && !progress && (
+                <p role="alert" className="text-amber-800">
+                    Last server refresh failed: {summary.lastError}{snapshot ? " Showing the previous snapshot." : ""}
+                </p>
+            )}
+            <RefreshTiming progress={progress} snapshot={snapshot}/>
             {progress?.reportsTotal > 0 && (
                 <progress
                     className="mt-1 block h-1.5 w-full accent-blue-700"
@@ -95,7 +191,10 @@ export default function FilterBar({data, onSelectAllUlbs}) {
         applyDateRange,
         refreshUlbs,
         refreshData,
+        dataFetchedAt,
+        dataRefreshStartedAt,
     } = data;
+    const allUlbSummary = liveAllUlb?.data;
     const invalidBoundaryCount = beatData?.beats.filter((beat) => beat.geofenceIssues?.length).length || 0;
     // On small screens the filter fields can be collapsed to a one-line summary.
     const [filtersOpen, setFiltersOpen] = useState(
@@ -123,7 +222,21 @@ export default function FilterBar({data, onSelectAllUlbs}) {
                         <span className="truncate">{filterSummary}</span>
                         <ChevronDown className={filtersOpen ? "rotate-180" : ""} aria-hidden="true"/>
                     </button>
-                    <div className="flex gap-2">
+                    <div className="flex flex-wrap items-center justify-end gap-2">
+                        {selectedUlbId === ALL_ULBS ? (
+                            <DataFreshness
+                                label="Server data updated"
+                                fetchedAt={allUlbSummary?.snapshot?.generatedAt}
+                                refreshing={false}
+                            />
+                        ) : selectedUlbId ? (
+                            <DataFreshness
+                                label="Data updated"
+                                fetchedAt={dataFetchedAt}
+                                refreshing={employeeListLoading || reportLoading}
+                                refreshStartedAt={dataRefreshStartedAt}
+                            />
+                        ) : null}
                         <button
                             type="button"
                             onClick={refreshUlbs}

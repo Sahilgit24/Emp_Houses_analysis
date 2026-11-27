@@ -196,3 +196,26 @@ test("an injected fetcher always bypasses the cache", async () => {
     await fetchUlbDirectory({fetcher});
     assert.equal(calls, 2);
 });
+
+test("live: true reads today's live report with the same headers", async () => {
+    let request;
+    await fetchEmployeeReport("3076", {id: "39", name: "Rahul"}, {
+        live: true,
+        fetcher: async (url, options) => {
+            request = {url, options};
+            return response(employeeReport(39));
+        },
+    });
+    assert.equal(request.url, WEIGHT_API_ENDPOINTS.liveEmployeeReport);
+    assert.match(request.url, /BeatWiseHouseScanningLiveReport$/);
+    assert.deepEqual(request.options.headers, {AppId: "3076", userId: "39"});
+});
+
+test("an employee report records when it was downloaded", async () => {
+    const before = Date.now();
+    const normalized = await fetchEmployeeReport("3076", {id: "39", name: "Rahul"}, {
+        fetcher: async () => response(employeeReport(39)),
+    });
+    const fetchedAt = Date.parse(normalized.fetchedAt);
+    assert.ok(fetchedAt >= before && fetchedAt <= Date.now());
+});

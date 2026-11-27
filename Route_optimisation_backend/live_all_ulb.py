@@ -1,9 +1,10 @@
 """Background loader for the All-ULB live view.
 
-The external report API always returns 30 days of data per employee (about 6 MB, mostly GPS
-points) and ignores date parameters, so loading every report in the browser is far too slow.
-This module downloads the reports on the server on a schedule, keeps only the live date (IST),
-and stores a compact snapshot that the frontend reads in one small request.
+Reports come from the live report API (BeatWiseHouseScanningLiveReport): the same request headers
+(AppId, userId) and response format as BeatWiseHouseScanningCompleteReport, but with today's data
+only, so a full pass over every ULB is fast. The loader downloads them on the server on a
+schedule, keeps only the live date (IST), and stores a compact snapshot that the frontend reads
+in one small request.
 
 Classification for the live date matches the Executive Overview rules, restricted to scans
 made today:
@@ -14,6 +15,7 @@ made today:
 An employee is active when their Beat has house records and their route for today has GPS points.
 """
 
+import atexit
 import json
 import logging
 import os
@@ -23,7 +25,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -35,7 +37,11 @@ logger = logging.getLogger(__name__)
 API_ENDPOINTS = {
     "ulbs": "https://weight.ictsbm.com/api/Get/AllULBListForWeightCollection",
     "employees": "https://weight.ictsbm.com/api/Get/GetActiveBeatUsers",
-    "report": "https://weight.ictsbm.com/api/Get/BeatWiseHouseScanningCompleteReport",
+    # Today-only live report. Override with LIVE_ALL_ULB_REPORT_URL when the API moves to a server.
+    "report": os.environ.get(
+        "LIVE_ALL_ULB_REPORT_URL",
+        "https://weight.ictsbm.com/api/Get/BeatWiseHouseScanningLiveReport",
+    ),
 }
 IST = timezone(timedelta(hours=5, minutes=30))
 CATEGORIES = ("inside", "outside", "other", "not_scanned_today")
@@ -51,10 +57,18 @@ def _env_int(name, default, minimum=1):
 
 REPORT_WORKERS = _env_int("LIVE_ALL_ULB_REPORT_WORKERS", 24)
 EMPLOYEE_LIST_WORKERS = _env_int("LIVE_ALL_ULB_LIST_WORKERS", 8)
-REFRESH_MINUTES = _env_int("LIVE_ALL_ULB_REFRESH_MINUTES", 30, minimum=5)
-# The background download is switched off by default: a full pass over all ULBs takes hours at
-# the external API's current speed. Set LIVE_ALL_ULB_ENABLED=1 to turn it on.
-LOADER_ENABLED = os.environ.get("LIVE_ALL_ULB_ENABLED", "0") == "1"
+REFRESH_MINUTES = _env_int("LIVE_ALL_ULB_REFRESH_MINUTES", 5, minimum=2)
+# On by default now that reports come from the today-only live API. Set LIVE_ALL_ULB_ENABLED=0
+# to switch the background download off.
+LOADER_ENABLED = os.environ.get("LIVE_ALL_ULB_ENABLED", "1") == "1"
+# "status" (default): only find out whether each ULB is active today. A ULB's remaining employees
+# are skipped as soon as one active employee is found; an inactive ULB still needs every Beat
+# employee checked. "full": download every Beat employee's report for coverage and collection
+# figures (much slower).
+STATUS_ONLY = os.environ.get("LIVE_ALL_ULB_MODE", "status") != "full"
+# When this many reports in a row fail before any succeeds, the live report API is treated as
+# unreachable and the refresh stops instead of trying every remaining employee.
+UNREACHABLE_AFTER_FAILURES = 20
 # After a failed refresh, wait this long before trying again instead of retrying every 30 seconds.
 RETRY_BACKOFF_SECONDS = _env_int("LIVE_ALL_ULB_RETRY_MINUTES", 10) * 60
 # Only one server process refreshes at a time; its lease expires if it stops renewing it.
@@ -537,6 +551,19 @@ class LiveAllUlbLoader:
                 return
             self._thread = threading.Thread(target=self._loop, name="live-all-ulb-loader", daemon=True)
             self._thread.start()
+            # When the server stops or reloads mid-refresh, give up the refresh lease at once so the
+            # next server process can start refreshing without waiting for the lease to expire.
+            atexit.register(self._release_on_exit)
+
+    def _release_on_exit(self):
+        state = self._running
+        if state is None:
+            return
+        try:
+            self.store.discard_run(state["run_id"])
+            self.store.release_lease()
+        except Exception:  # the process is exiting; nothing else to do
+            logger.exception("Could not release the All-ULB refresh lease on exit")
 
     def request_refresh(self):
         if not LOADER_ENABLED:
@@ -616,6 +643,10 @@ class LiveAllUlbLoader:
             "run_id": run_id,
             "live_date": live_date,
             "started_at": _now_iso(),
+            # Timing of this refresh, in seconds since it started.
+            "started_clock": time.time(),
+            "lists_seconds": None,       # every ULB's employee list loaded
+            "status_seconds": None,      # every ULB known to be active or inactive
             "ulbs": {ulb["id"]: self._empty_ulb_row(ulb) for ulb in ulbs},
             "lists_done": 0,
             "reports_total": 0,
@@ -627,6 +658,12 @@ class LiveAllUlbLoader:
         try:
             self._run(ulbs, state)
             summary = self._summary_from_state(state, complete=True)
+            timing = summary["timing"]
+            logger.warning(
+                "All-ULB refresh complete in %ss (employee lists %ss, every ULB's status %ss, %s reports/min)",
+                timing["elapsedSeconds"], timing["employeeListsSeconds"], timing["ulbStatusSeconds"],
+                timing["reportsPerMinute"],
+            )
             self.store.finish_run(run_id, "complete", summary)
             with self._lock:
                 self._complete_run_id, self._complete_summary = run_id, summary
@@ -665,7 +702,13 @@ class LiveAllUlbLoader:
                 with self._lock:
                     state["lists_done"] += 1
                     state["reports_total"] += row["beat_employees"]
+                # Loading every ULB's employee list can take minutes; keep the refresh lease alive.
+                if time.time() - self._last_renew >= 60:
+                    self.store.renew_lease()
+                    self._last_renew = time.time()
 
+        with self._lock:
+            state["lists_seconds"] = round(time.time() - state["started_clock"])
         pending = {ulb_id: sum(1 for item in employees if item["has_beat"])
                    for ulb_id, employees in employee_lists.items()}
         results = {ulb_id: [] for ulb_id in employee_lists}
@@ -675,34 +718,83 @@ class LiveAllUlbLoader:
             if count == 0:
                 self._finalize_ulb(state, ulb_by_id[ulb_id], [], [], employee_lists[ulb_id])
 
+        unreachable = None
+        # Only a few downloads are queued at a time, so stopping or reloading the server never
+        # waits for thousands of queued requests.
+        queue = iter(report_order(employee_lists))
+        status_only = STATUS_ONLY
+        decided = set()  # status-only: ULBs already found Active, whose other employees are skipped
+        submitted = {ulb_id: 0 for ulb_id in employee_lists}
         with ThreadPoolExecutor(REPORT_WORKERS) as pool:
             futures = {}
-            for ulb_id, employee in report_order(employee_lists):
-                ulb = ulb_by_id[ulb_id]
-                futures[pool.submit(self._load_report, ulb, employee, state["live_date"])] = (ulb, employee)
-            for future in as_completed(futures):
-                ulb, employee = futures[future]
-                try:
-                    beats = future.result()
-                    results[ulb["id"]].append({"employee": employee, "beats": beats})
-                    active = any(beat["has_house_records"] and beat["gps_points_today"] > 0 for beat in beats)
-                    with self._lock:  # the ULB turns Active as soon as one active employee is found
-                        row = state["ulbs"][ulb["id"]]
-                        row["checked_reports"] += 1
-                        row["active_employees"] += int(active)
-                except Exception as error:
-                    failures[ulb["id"]].append({**employee, "error": str(error) or "The report could not be loaded."})
+
+            def submit_next():
+                for ulb_id, employee in queue:
+                    if ulb_id in decided:
+                        continue
+                    submitted[ulb_id] += 1
+                    ulb = ulb_by_id[ulb_id]
+                    futures[pool.submit(self._load_report, ulb, employee, state["live_date"])] = (ulb, employee)
+                    return True
+                return False
+
+            while len(futures) < REPORT_WORKERS * 2 and submit_next():
+                pass
+            while futures and unreachable is None:
+                done, _ = wait(futures, return_when=FIRST_COMPLETED)
+                for future in done:
+                    ulb, employee = futures.pop(future)
+                    if ulb["id"] in decided:
+                        # Already known to be Active; this report was in flight and is not needed.
+                        with self._lock:
+                            state["reports_done"] += 1
+                        submit_next()
+                        continue
+                    try:
+                        beats = future.result()
+                        results[ulb["id"]].append({"employee": employee, "beats": beats})
+                        active = any(beat["has_house_records"] and beat["gps_points_today"] > 0 for beat in beats)
+                        with self._lock:  # the ULB turns Active as soon as one active employee is found
+                            row = state["ulbs"][ulb["id"]]
+                            row["checked_reports"] += 1
+                            row["active_employees"] += int(active)
+                    except Exception as error:
+                        failures[ulb["id"]].append({**employee, "error": str(error) or "The report could not be loaded."})
+                        with self._lock:
+                            state["reports_failed"] += 1
+                            nothing_loaded = state["reports_failed"] == state["reports_done"] + 1
+                        if nothing_loaded and state["reports_failed"] >= min(UNREACHABLE_AFTER_FAILURES, state["reports_total"]):
+                            unreachable = error
+                            break
                     with self._lock:
-                        state["reports_failed"] += 1
-                with self._lock:
-                    state["reports_done"] += 1
-                if time.time() - self._last_renew >= 60:
-                    self.store.renew_lease()
-                    self._last_renew = time.time()
-                pending[ulb["id"]] -= 1
-                if pending[ulb["id"]] == 0:
-                    self._finalize_ulb(state, ulb, results.pop(ulb["id"]), failures.pop(ulb["id"]),
-                                       employee_lists[ulb["id"]])
+                        state["reports_done"] += 1
+                    if time.time() - self._last_renew >= 60:
+                        self.store.renew_lease()
+                        self._last_renew = time.time()
+                    pending[ulb["id"]] -= 1
+                    found_active = status_only and state["ulbs"][ulb["id"]]["active_employees"] > 0
+                    if found_active:
+                        # Status-only: the ULB is Active; skip its remaining employees.
+                        decided.add(ulb["id"])
+                        skipped = sum(1 for item in employee_lists[ulb["id"]] if item["has_beat"]) - submitted[ulb["id"]]
+                        with self._lock:
+                            state["reports_total"] -= skipped
+                        failures.pop(ulb["id"])
+                        self._finalize_ulb(state, ulb, results.pop(ulb["id"]), [], employee_lists[ulb["id"]])
+                    elif pending[ulb["id"]] == 0:
+                        self._finalize_ulb(state, ulb, results.pop(ulb["id"]), failures.pop(ulb["id"]),
+                                           employee_lists[ulb["id"]])
+                    submit_next()
+            for future in futures:
+                future.cancel()
+        if unreachable is not None:
+            # The run is discarded and the previous snapshot keeps being served.
+            detail = str(unreachable)
+            if any(text in detail for text in ("refused", "10061", "NewConnectionError", "Failed to resolve")):
+                detail = "nothing is answering at this address. Check that the API is running and reachable from the backend."
+            elif "timed out" in detail.lower():
+                detail = "the request timed out."
+            raise RuntimeError(f"The live report API could not be reached ({API_ENDPOINTS['report']}): {detail}")
 
     def _finalize_ulb(self, state, ulb, employee_results, failed, employees):
         employee_rows, beat_rows, house_rows, counts = classify_ulb(employee_results, state["live_date"])
@@ -773,15 +865,44 @@ class LiveAllUlbLoader:
         totals["pendingUlbs"] = totals["ulbs"] - totals["activeUlbs"] - totals["inactiveUlbs"]
         totals["checkingUlbs"] = sum(1 for row in ulb_rows if row["checking"] and row["activeEmployees"] == 0)
         totals["incompleteUlbs"] = totals["pendingUlbs"] - totals["checkingUlbs"]
+        timing = self._timing(state, progress, totals, complete)
+        progress["timing"] = timing
         return {
             "runId": state["run_id"],
             "liveDate": state["live_date"],
             "startedAt": state["started_at"],
             "generatedAt": _now_iso(),
             "complete": complete,
+            # "status": only each ULB's active / inactive status is known (coverage is not computed).
+            "mode": "status" if STATUS_ONLY else "full",
+            "timing": timing,
             "progress": progress,
             "totals": totals,
             "ulbs": ulb_rows,
+        }
+
+    def _timing(self, state, progress, totals, complete):
+        """How long this refresh has taken so far, its speed, and the expected time left."""
+        elapsed = round(time.time() - state.get("started_clock", time.time()))
+        with self._lock:
+            if state.get("status_seconds") is None and state.get("lists_seconds") is not None                     and totals["checkingUlbs"] == 0:
+                state["status_seconds"] = elapsed
+            lists_seconds = state.get("lists_seconds")
+            status_seconds = state.get("status_seconds")
+        report_seconds = elapsed - lists_seconds if lists_seconds is not None else 0
+        done, total = progress["reportsDone"], progress["reportsTotal"]
+        per_minute = round(done / report_seconds * 60, 1) if report_seconds > 0 and done else None
+        remaining = None
+        if not complete and per_minute and total > done:
+            remaining = round((total - done) / per_minute * 60)
+        return {
+            "startedAt": state["started_at"],
+            "finishedAt": _now_iso() if complete else None,
+            "elapsedSeconds": elapsed,
+            "employeeListsSeconds": lists_seconds,
+            "ulbStatusSeconds": status_seconds,
+            "reportsPerMinute": per_minute,
+            "remainingSeconds": remaining,
         }
 
     def snapshot(self):

@@ -44,6 +44,10 @@ export function useWeightCollectionData() {
     const [ulbError, setUlbError] = useState("");
     const [ulbReloadKey, setUlbReloadKey] = useState(0);
     const [dataReloadKey, setDataReloadKey] = useState(0);
+    // When the selected ULB's reports were downloaded from the API (the oldest report counts),
+    // and when the current refresh started.
+    const [dataFetchedAt, setDataFetchedAt] = useState("");
+    const [dataRefreshStartedAt, setDataRefreshStartedAt] = useState("");
 
     useEffect(() => {
         const controller = new AbortController();
@@ -84,6 +88,8 @@ export function useWeightCollectionData() {
             setRangeToDate("");
             setIsRangeOpen(false);
             setDateSelection(LIVE_DATE);
+            setDataFetchedAt("");
+            setDataRefreshStartedAt("");
             return undefined;
         }
 
@@ -102,6 +108,8 @@ export function useWeightCollectionData() {
             setIsRangeOpen(false);
             setEmployeeListLoading(true);
             setReportLoading(false);
+            setDataFetchedAt("");
+            setDataRefreshStartedAt(new Date().toISOString());
             try {
                 // All ULBs: the live summary effect below reads the backend snapshot.
                 if (selectedUlbId === ALL_ULBS) return;
@@ -116,7 +124,10 @@ export function useWeightCollectionData() {
                 const reportEmployees = employees.filter((employee) => employee.hasBeat !== false);
                 setReportProgress({completed: 0, total: reportEmployees.length});
                 setEmployeeListLoading(false);
-                if (!reportEmployees.length) return;
+                if (!reportEmployees.length) {
+                    setDataFetchedAt(new Date().toISOString());
+                    return;
+                }
 
                 setReportLoading(true);
                 const {reports, errors} = await fetchEmployeeReports(selectedUlbId, reportEmployees, {
@@ -139,6 +150,8 @@ export function useWeightCollectionData() {
                 setLoadedSources(sources);
                 setBeatData(combinedData);
                 setReportErrors(errors);
+                const fetchTimes = reports.map(({data}) => data.fetchedAt).filter(Boolean).sort();
+                setDataFetchedAt(fetchTimes[0] || new Date().toISOString());
             } catch (error) {
                 if (controller.signal.aborted) return;
                 setDataLoadError(error instanceof Error
@@ -287,6 +300,8 @@ export function useWeightCollectionData() {
     };
 
     return {
+        dataFetchedAt,
+        dataRefreshStartedAt,
         beatData,
         ulbs,
         selectedUlbId,

@@ -131,6 +131,8 @@ export default function AllUlbLiveOverview({live, liveDate}) {
     const snapshot = summary?.snapshot;
     const totals = snapshot?.totals;
     const runId = snapshot?.runId;
+    // Status-only refresh: the server only finds out whether each ULB is active today.
+    const statusOnly = snapshot?.mode === "status";
     const pattern = useMemo(() => liveCollectionPattern(totals), [totals]);
     const collectedToday = totals
         ? totals.counts.inside + totals.counts.outside + totals.counts.other
@@ -189,7 +191,9 @@ export default function AllUlbLiveOverview({live, liveDate}) {
                 <p className="text-sm font-semibold text-blue-700">Live monitoring · {snapshot?.liveDate || liveDate} IST</p>
                 <h1 className="mt-1 text-2xl font-bold text-slate-900">All ULBs</h1>
                 <p className="mt-1 text-sm text-slate-600">
-                    Today&apos;s activity and collection status across Maharashtra. All-ULB monitoring shows the live date only.
+                    {statusOnly
+                        ? "Which ULBs are active today across Maharashtra. A ULB is Active as soon as one employee is found working today."
+                        : "Today's activity and collection status across Maharashtra. All-ULB monitoring shows the live date only."}
                 </p>
                 <p className="mt-1 text-xs text-slate-500">
                     The server prepares this view in the background{summary ? ` and updates it every ${summary.refreshMinutes} minutes` : ""}
@@ -208,7 +212,9 @@ export default function AllUlbLiveOverview({live, liveDate}) {
                         live?.error ? "border-red-200 bg-red-50 text-red-800" : "border-slate-200 bg-white text-slate-600"
                     }`}>
                         {live?.error || (summary?.enabled === false
-                            ? "All-ULB live monitoring is switched off on the server, because loading every ULB takes several hours with the current report API. Select a single ULB to see its data."
+                            ? "All-ULB live monitoring is switched off on the server (LIVE_ALL_ULB_ENABLED=0). Select a single ULB to see its data."
+                            : summary?.lastError && !summary.refreshProgress
+                                ? `The last server refresh failed: ${summary.lastError} It is retried automatically.`
                             : summary
                                 ? "The server is preparing today's All-ULB data. The first ULBs appear here as soon as they are ready."
                                 : "Loading All-ULB live data…")}
@@ -222,20 +228,28 @@ export default function AllUlbLiveOverview({live, liveDate}) {
         <div className="h-full overflow-y-auto bg-slate-50 p-4 sm:p-6">
             <div className="mx-auto flex w-full max-w-7xl flex-col gap-5">
                 {header}
-                {(!snapshot.complete || summary.stale) && (
+                {(!snapshot.complete || summary.stale) && !statusOnly && (
                     <p role="status" className="rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm text-blue-900">
                         {summary.stale
                             ? `These figures are from ${snapshot.liveDate}. Today's snapshot is being prepared and will replace them automatically.`
                             : `Checking today's activity ULB by ULB. A ULB is marked Active as soon as one of its employees is found working today, and Inactive once all its Beat employees are checked. Coverage and the collection pattern appear when every ULB is finished.`}
                     </p>
                 )}
-                {snapshot.complete && totals.failedReports > 0 && (
+                {statusOnly && (
+                    <p role="status" className="rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm text-blue-900">
+                        {summary.stale
+                            ? `These figures are from ${snapshot.liveDate}. Today's check is running and will replace them automatically. `
+                            : ""}
+                        Each ULB is checked employee by employee, most likely active first. It is marked Active as soon as one employee has GPS points and house records today, and its other employees are skipped. It is marked Inactive only after every Beat employee has been checked.
+                    </p>
+                )}
+                {snapshot.complete && !statusOnly && totals.failedReports > 0 && (
                     <p role="status" className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
                         {totals.failedReports.toLocaleString()} employee report{totals.failedReports === 1 ? "" : "s"} could not be loaded. Figures use the loaded reports only; those employees are not counted as inactive.
                     </p>
                 )}
 
-                {!snapshot.complete ? (
+                {!snapshot.complete || statusOnly ? (
                     <section aria-label="All-ULB activity so far" className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                         <EmployeeStatusCard
                             label="Active ULBs today" icon={Building2} total={totals.ulbs}
@@ -252,17 +266,28 @@ export default function AllUlbLiveOverview({live, liveDate}) {
                         <EmployeeStatusCard
                             label="ULBs still being checked" icon={CircleDashed} total={totals.ulbs}
                             value={totals.checkingUlbs ?? totals.pendingUlbs}
-                            detail={totals.incompleteUlbs
-                                ? `${totals.incompleteUlbs.toLocaleString()} more are unavailable or partial`
-                                : "No active employee found yet"}
+                            detail={statusOnly
+                                ? "No active employee found yet"
+                                : totals.incompleteUlbs
+                                    ? `${totals.incompleteUlbs.toLocaleString()} more are unavailable or partial`
+                                    : "No active employee found yet"}
                             tone="text-slate-700"
                         />
-                        <EmployeeStatusCard
-                            label="Active employees found" icon={UserCheck} total={totals.beatEmployees}
-                            value={totals.activeEmployees}
-                            detail={`${totals.checkedReports.toLocaleString()} of ${totals.beatEmployees.toLocaleString()} Beat employees checked`}
-                            tone="text-emerald-700"
-                        />
+                        {statusOnly ? (
+                            <EmployeeStatusCard
+                                label="ULBs unavailable / partial" icon={CircleDashed} total={totals.ulbs}
+                                value={totals.incompleteUlbs ?? 0}
+                                detail="Employee list or some reports could not be loaded"
+                                tone="text-amber-700"
+                            />
+                        ) : (
+                            <EmployeeStatusCard
+                                label="Active employees found" icon={UserCheck} total={totals.beatEmployees}
+                                value={totals.activeEmployees}
+                                detail={`${totals.checkedReports.toLocaleString()} of ${totals.beatEmployees.toLocaleString()} Beat employees checked`}
+                                tone="text-emerald-700"
+                            />
+                        )}
                     </section>
                 ) : (
                     <section aria-label="All-ULB live totals" className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
@@ -309,7 +334,7 @@ export default function AllUlbLiveOverview({live, liveDate}) {
                     </section>
                 )}
 
-                {snapshot.complete && (
+                {snapshot.complete && !statusOnly && (
                 <section className="grid gap-4 lg:grid-cols-[minmax(260px,0.8fr)_minmax(0,1.2fr)]">
                     <article aria-labelledby="live-coverage-heading" className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
                         <h2 id="live-coverage-heading" className="section-heading font-semibold text-slate-900"><SectionIcon icon={Target} tone="emerald"/>Coverage Today</h2>
@@ -362,7 +387,8 @@ export default function AllUlbLiveOverview({live, liveDate}) {
                         <div>
                             <h2 id="ulb-activity-heading" className="section-heading font-semibold text-slate-900"><SectionIcon icon={Building2} tone="blue"/>ULB Activity Today</h2>
                             <p className="mt-1 text-sm text-slate-500">
-                                Active means at least one employee has GPS route points today and house records in the report. Houses and scans appear once a ULB is fully checked.
+                                Active means at least one employee has GPS route points today and house records in the report.
+                                {statusOnly ? "" : " Houses and scans appear once a ULB is fully checked."}
                             </p>
                         </div>
                         <label className="relative w-full sm:w-64">
@@ -379,14 +405,20 @@ export default function AllUlbLiveOverview({live, liveDate}) {
                         </label>
                     </div>
                     <div className="max-h-[34rem] overflow-auto">
-                        <table className="w-full min-w-[820px] border-collapse text-left text-sm">
+                        <table className={`w-full ${statusOnly ? "min-w-[560px]" : "min-w-[820px]"} border-collapse text-left text-sm`}>
                             <thead className="sticky top-0 bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
                                 <tr>
                                     <th scope="col" className="px-4 py-3 font-semibold">ULB</th>
                                     <th scope="col" className="px-4 py-3 font-semibold">Employees</th>
-                                    <th scope="col" className="px-4 py-3 font-semibold">Active today</th>
-                                    <th scope="col" className="px-4 py-3 font-semibold">Houses</th>
-                                    <th scope="col" className="px-4 py-3 font-semibold">Scanned today</th>
+                                    {statusOnly ? (
+                                        <th scope="col" className="px-4 py-3 font-semibold">Beat employees checked</th>
+                                    ) : (
+                                        <>
+                                            <th scope="col" className="px-4 py-3 font-semibold">Active today</th>
+                                            <th scope="col" className="px-4 py-3 font-semibold">Houses</th>
+                                            <th scope="col" className="px-4 py-3 font-semibold">Scanned today</th>
+                                        </>
+                                    )}
                                     <th scope="col" className="px-4 py-3 font-semibold">Status</th>
                                 </tr>
                             </thead>
@@ -397,17 +429,28 @@ export default function AllUlbLiveOverview({live, liveDate}) {
                                             <span className="person-cell"><Avatar name={ulb.name}/>{ulb.name}</span>
                                         </th>
                                         <td className="px-4 py-3 tabular-nums text-slate-600">{ulb.employees.toLocaleString()}</td>
-                                        <td className="px-4 py-3 tabular-nums text-slate-600">{ulb.activeEmployees.toLocaleString()}</td>
-                                        <td className="px-4 py-3 tabular-nums text-slate-600">{ulb.checking ? "—" : ulb.totalHouses.toLocaleString()}</td>
-                                        <td className="px-4 py-3 tabular-nums text-slate-600">
-                                            {ulb.checking ? "—" : ulb.collected.toLocaleString()}
-                                            {!ulb.checking && ulb.coverage != null && <span className="ml-1 text-xs text-slate-400">({ulb.coverage.toFixed(1)}%)</span>}
-                                        </td>
+                                        {statusOnly ? (
+                                            <td className="px-4 py-3 tabular-nums text-slate-600">
+                                                {ulb.checkedReports.toLocaleString()} of {ulb.beatEmployees.toLocaleString()}
+                                                {ulb.status.startsWith("Active") && ulb.checkedReports < ulb.beatEmployees && (
+                                                    <span className="ml-1 text-xs text-slate-400">(rest skipped)</span>
+                                                )}
+                                            </td>
+                                        ) : (
+                                            <>
+                                                <td className="px-4 py-3 tabular-nums text-slate-600">{ulb.activeEmployees.toLocaleString()}</td>
+                                                <td className="px-4 py-3 tabular-nums text-slate-600">{ulb.checking ? "—" : ulb.totalHouses.toLocaleString()}</td>
+                                                <td className="px-4 py-3 tabular-nums text-slate-600">
+                                                    {ulb.checking ? "—" : ulb.collected.toLocaleString()}
+                                                    {!ulb.checking && ulb.coverage != null && <span className="ml-1 text-xs text-slate-400">({ulb.coverage.toFixed(1)}%)</span>}
+                                                </td>
+                                            </>
+                                        )}
                                         <td className="px-4 py-3">
                                             <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${statusTone(ulb.status)}`}>
                                                 {ulb.status}
                                             </span>
-                                            {ulb.checking && ulb.beatEmployees > 0 && (
+                                            {ulb.checking && !statusOnly && ulb.beatEmployees > 0 && (
                                                 <span className="ml-2 text-xs text-slate-500">
                                                     {ulb.checkedReports.toLocaleString()} of {ulb.beatEmployees.toLocaleString()} checked
                                                 </span>
@@ -422,15 +465,15 @@ export default function AllUlbLiveOverview({live, liveDate}) {
                                     </tr>
                                 ))}
                                 {!ulbRows.length && (
-                                    <tr><td colSpan={6} className="p-6 text-center text-slate-500">No ULBs match this search.</td></tr>
+                                    <tr><td colSpan={statusOnly ? 4 : 6} className="p-6 text-center text-slate-500">No ULBs match this search.</td></tr>
                                 )}
                             </tbody>
                         </table>
                     </div>
                 </section>
-                <p className="text-xs text-slate-500">
+                {!statusOnly && <p className="text-xs text-slate-500">
                     Collection categories use scans recorded today ({snapshot.liveDate}, IST) only. Outside-Beat means the scanner is assigned to another Beat in the same ULB.
-                </p>
+                </p>}
             </div>
             <LiveListDialog request={listRequest} onClose={() => setListRequest(null)}/>
         </div>

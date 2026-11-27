@@ -5,6 +5,8 @@ export const WEIGHT_API_ENDPOINTS = {
     ulbs: "https://weight.ictsbm.com/api/Get/AllULBListForWeightCollection",
     employees: "https://weight.ictsbm.com/api/Get/GetActiveBeatUsers",
     employeeReport: "https://weight.ictsbm.com/api/Get/BeatWiseHouseScanningCompleteReport",
+    // Same headers and format as employeeReport, but today's data only.
+    liveEmployeeReport: "https://weight.ictsbm.com/api/Get/BeatWiseHouseScanningLiveReport",
 };
 
 const REPORT_CONCURRENCY = 4;
@@ -21,16 +23,19 @@ export function clearWeightApiCache() {
     responseCache.clear();
 }
 
-async function getJson(url, headers = {}, signal, fetcher) {
+// Returns the payload and when it was downloaded from the API (an earlier time when it comes
+// from the short-lived cache), so the page can show how fresh its data is.
+async function getJsonWithTime(url, headers = {}, signal, fetcher) {
     // Only the app's own network fetches are cached; an injected fetcher (tests) always runs.
     const cacheKey = fetcher ? null : `${url}|${JSON.stringify(headers)}`;
     if (cacheKey) {
         const cached = responseCache.get(cacheKey);
         if (cached && Date.now() - cached.storedAt < RESPONSE_CACHE_TTL_MS) {
-            return structuredClone(cached.payload);
+            return {payload: structuredClone(cached.payload), fetchedAt: new Date(cached.storedAt).toISOString()};
         }
         responseCache.delete(cacheKey);
     }
+    const fetchedAt = new Date().toISOString();
     const response = await (fetcher || globalThis.fetch)(url, {method: "GET", headers, signal});
     if (!response.ok) {
         throw new Error(`Request failed (HTTP ${response.status}).`);
@@ -43,7 +48,11 @@ async function getJson(url, headers = {}, signal, fetcher) {
             responseCache.delete(responseCache.keys().next().value);
         }
     }
-    return payload;
+    return {payload, fetchedAt};
+}
+
+async function getJson(url, headers = {}, signal, fetcher) {
+    return (await getJsonWithTime(url, headers, signal, fetcher)).payload;
 }
 
 export async function fetchUlbDirectory({signal, fetcher} = {}) {
@@ -111,11 +120,12 @@ function releaseRawPayloadReferences(normalized) {
     return normalized;
 }
 
-export async function fetchEmployeeReport(appId, employee, {signal, fetcher} = {}) {
+// live: true reads today's live report instead of the 30-day report.
+export async function fetchEmployeeReport(appId, employee, {signal, fetcher, live = false} = {}) {
     if (!appId) throw new Error("Select a ULB before loading employee reports.");
     if (!employee?.id) throw new Error("The employee report request requires a user ID.");
-    const payload = await getJson(
-        WEIGHT_API_ENDPOINTS.employeeReport,
+    const {payload, fetchedAt} = await getJsonWithTime(
+        live ? WEIGHT_API_ENDPOINTS.liveEmployeeReport : WEIGHT_API_ENDPOINTS.employeeReport,
         {AppId: String(appId), userId: String(employee.id)},
         signal,
         fetcher,
@@ -134,6 +144,7 @@ export async function fetchEmployeeReport(appId, employee, {signal, fetcher} = {
         },
         beatUserId: String(employee.id),
     }));
+    normalized.fetchedAt = fetchedAt;
     return releaseRawPayloadReferences(normalized);
 }
 

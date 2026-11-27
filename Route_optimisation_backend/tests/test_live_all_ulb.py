@@ -9,6 +9,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import live_all_ulb as live  # noqa: E402
 
+# Most tests cover the full download; StatusOnlyTests switch status-only mode on.
+live.STATUS_ONLY = False
+
 TODAY = "2026-11-25"
 
 
@@ -126,6 +129,12 @@ class LoaderTests(unittest.TestCase):
         self.assertEqual(totals["counts"], {"inside": 1, "outside": 1, "other": 0, "not_scanned_today": 1})
         statuses = {row["name"]: row["status"] for row in snapshot["ulbs"]}
         self.assertEqual(statuses, {"Alpha": "Active", "Beta": "Partial"})
+        timing = snapshot["timing"]
+        self.assertIsNotNone(timing["finishedAt"])
+        self.assertGreaterEqual(timing["elapsedSeconds"], 0)
+        self.assertIsNotNone(timing["employeeListsSeconds"])
+        self.assertIsNotNone(timing["ulbStatusSeconds"])
+        self.assertIsNone(timing["remainingSeconds"])
         houses = self.store.query(
             "SELECT house_id FROM live_houses WHERE run_id = ? AND category = 'outside'", [snapshot["runId"]])
         self.assertEqual(houses, [{"house_id": "2"}])
@@ -238,3 +247,79 @@ class RobustnessTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LiveReportApiTests(unittest.TestCase):
+    def test_reports_come_from_the_live_api(self):
+        self.assertIn("BeatWiseHouseScanningLiveReport", live.API_ENDPOINTS["report"])
+
+    def test_unreachable_live_api_stops_the_refresh_and_keeps_the_previous_snapshot(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store = live.LiveStore(os.path.join(tmp.name, "live.sqlite3"))
+        users = [{"UserId": index, "UserName": f"User {index}"} for index in range(1, 200)]
+        reachable = {"value": True}
+        report_calls = []
+
+        def fake_get(url, headers=None):
+            headers = headers or {}
+            if url == live.API_ENDPOINTS["ulbs"]:
+                return json.dumps([{"ulb": "Alpha", "appid": 1}]).encode()
+            if url == live.API_ENDPOINTS["employees"]:
+                return json.dumps({"AllUsers": users}).encode()
+            report_calls.append(headers["userId"])
+            if not reachable["value"]:
+                raise RuntimeError("Connection refused")
+            return json.dumps(report(headers["userId"], [house(1, [TODAY + "T08:00"], 1, "User 1")])).encode()
+
+        loader = live.LiveAllUlbLoader(store=store, session=object())
+        with mock.patch.object(loader, "_get", side_effect=fake_get), \
+                mock.patch.object(live, "live_date_ist", return_value=TODAY):
+            loader.run_once()
+            first_run = loader.snapshot()["snapshot"]["runId"]
+            reachable["value"] = False
+            report_calls.clear()
+            with self.assertRaises(RuntimeError) as raised:
+                loader.run_once()
+            result = loader.snapshot()
+        self.assertIn("live report API could not be reached", str(raised.exception))
+        # It stopped early instead of trying all 199 employees.
+        self.assertLess(len(report_calls), 199)
+        self.assertEqual(result["snapshot"]["runId"], first_run)
+        self.assertFalse(result["refreshing"])
+
+
+class StatusOnlyTests(unittest.TestCase):
+    def test_ulb_stops_at_first_active_employee_and_inactive_ulb_checks_everyone(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store = live.LiveStore(os.path.join(tmp.name, "live.sqlite3"))
+        requested = []
+        active_users = [{"UserId": index, "UserName": f"A{index}"} for index in range(1, 61)]
+        idle_users = [{"UserId": index, "UserName": f"I{index}"} for index in range(101, 106)]
+
+        def fake_get(url, headers=None):
+            headers = headers or {}
+            if url == live.API_ENDPOINTS["ulbs"]:
+                return json.dumps([{"ulb": "Busy", "appid": 1}, {"ulb": "Idle", "appid": 2}]).encode()
+            if url == live.API_ENDPOINTS["employees"]:
+                users = active_users if headers["AppId"] == "1" else idle_users
+                return json.dumps({"AllUsers": users, "AllBeats": users}).encode()
+            requested.append((headers["AppId"], headers["userId"]))
+            user = headers["userId"]
+            gps = 3 if headers["AppId"] == "1" else 0
+            return json.dumps(report(user, [house(int(user), [TODAY + "T08:00"], int(user), "x")], gps_today=gps)).encode()
+
+        loader = live.LiveAllUlbLoader(store=store, session=object())
+        with mock.patch.object(live, "STATUS_ONLY", True),                 mock.patch.object(loader, "_get", side_effect=fake_get),                 mock.patch.object(live, "live_date_ist", return_value=TODAY):
+            loader.run_once()
+            snapshot = loader.snapshot()["snapshot"]
+        statuses = {row["name"]: row["status"] for row in snapshot["ulbs"]}
+        self.assertEqual(statuses, {"Busy": "Active", "Idle": "Inactive"})
+        self.assertEqual(snapshot["mode"], "status")
+        busy_calls = [call for call in requested if call[0] == "1"]
+        idle_calls = [call for call in requested if call[0] == "2"]
+        # Busy stopped early (only the reports already in flight); Idle checked all 5 employees.
+        self.assertLess(len(busy_calls), 60)
+        self.assertEqual(len(idle_calls), 5)
+        self.assertEqual(snapshot["progress"]["reportsDone"], snapshot["progress"]["reportsTotal"])

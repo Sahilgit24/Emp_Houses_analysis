@@ -81,6 +81,7 @@ export default function App() {
                     {renderTab("route", (
                         <BeatHouseRoutePlanner
                             visible={activePlanner === "route"}
+                            ulbId={selectedUlbId}
                             beatData={beatData}
                             employeeList={employeeList}
                             liveDate={liveTodayDate}

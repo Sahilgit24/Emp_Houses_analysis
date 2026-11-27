@@ -20,8 +20,17 @@ import {
     getBeatPlannerEmployeeOptions,
     getHistoricallyCollectedHouses,
 } from "@/data/employeePerformance.js";
-import {createEmployeeGeofence, OUTLIER_DISTANCE_METERS} from "@/data/employeeGeofence.js";
+import {
+    clampDistanceLimit,
+    createEmployeeGeofence,
+    findHousesInSeveralBeats,
+    MAX_DISTANCE_LIMIT_METERS,
+    mergeCollectedHouses,
+    MIN_DISTANCE_LIMIT_METERS,
+    OUTLIER_DISTANCE_METERS,
+} from "@/data/employeeGeofence.js";
 import {isInsidePolygon} from "@/data/routeBeatData.js";
+import {fetchEmployeeReport} from "@/data/weightCollectionApi.js";
 
 const startIcon = L.icon({
     iconUrl: "/house-icons/start.jpeg",
@@ -536,6 +545,7 @@ function BeatRouteMap({
         () => playbackType === "historical" ? historicalPath : selectedRoute?.route_path || [],
         [playbackType, historicalPath, selectedRoute],
     );
+    const housesInSeveralBeats = useMemo(() => findHousesInSeveralBeats(allBeats), [allBeats]);
     const houseFeatureData = useMemo(() => ({
         type: "FeatureCollection",
         features: houseEntries.map(({house, beat: houseBeat}) => {
@@ -551,11 +561,17 @@ function BeatRouteMap({
             const includedInPlan = plannedHouseKeys.has(house.route_key);
             const collectedToday = house.house_id != null && coveredHouseIds.has(house.house_id);
             const isOptimizationCandidate = optimizationCandidateHouseIds.has(house.house_id);
+            const otherListings = (housesInSeveralBeats.get(String(house.house_id)) || [])
+                .filter((owner) => owner.beatId !== houseBeat.id);
+            const listedElsewhereLine = otherListings.length
+                ? [`Also listed in another Beat: ${otherListings.map((owner) => owner.label).join(", ")}`]
+                : [];
             const popupLines = beat
                 ? [
                     house.house_id
                         ? `House ID: ${house.house_id}`
                         : "House ID unavailable; coordinate-only candidate",
+                    ...listedElsewhereLine,
                     `${house.lat.toFixed(6)}, ${house.lon.toFixed(6)}`,
                     `Status on ${selectedDate}: ${categoryColor.label}`,
                     ...(attentionDetail
@@ -579,6 +595,7 @@ function BeatRouteMap({
                 : [
                     `Beat: ${houseBeat.beatName}`,
                     house.house_id ? `House ID: ${house.house_id}` : "House ID unavailable",
+                    ...listedElsewhereLine,
                     `Status on ${selectedDate}: ${categoryColor.label}`,
                     ...(attentionDetail
                         ? [`Collection attention: ${attentionDetail.attentionReason}`]
@@ -602,6 +619,7 @@ function BeatRouteMap({
     }), [
         beat,
         attentionDetailsByBeat,
+        housesInSeveralBeats,
         collectionMappingAvailable,
         coveredHouseIds,
         houseEntries,
@@ -726,6 +744,17 @@ function BeatRouteMap({
                         }}
                     >
                         <Popup>Candidate employee geofence preview · boundary {index + 1}</Popup>
+                    </Polygon>
+                ))
+            )}
+            {(geofencePreview?.neighborUpdates || []).flatMap((update) =>
+                update.polygons.map((polygon, index) => (
+                    <Polygon
+                        key={`neighbor-geofence-preview-${update.id}-${index}`}
+                        positions={polygon}
+                        pathOptions={{color: "#ea580c", weight: 3, fillOpacity: 0.04, dashArray: "4 6"}}
+                    >
+                        <Popup>{update.name}: reduced fence if you keep the new one</Popup>
                     </Polygon>
                 ))
             )}
@@ -901,6 +930,7 @@ function BeatRouteMap({
 
 export default function BeatHouseRoutePlanner({
     visible = true,
+    ulbId = "",
     beatData,
     employeeList = null,
     liveDate = "",
@@ -928,6 +958,17 @@ export default function BeatHouseRoutePlanner({
     const [geofenceOverrides, setGeofenceOverrides] = useState({});
     const [geofencePreview, setGeofencePreview] = useState(null);
     const [geofenceError, setGeofenceError] = useState("");
+    // Houses the rebuild uses: fetched on "Rebuild" from the employee's 30-day report plus
+    // today's live report, so a house collected only once in the month is still included.
+    const [fenceSource, setFenceSource] = useState(null);
+    const fenceRequestRef = useRef(0);
+    // Rebuild settings: how far (m) a collected house may be from the existing Beat, and whether
+    // the new fence is trimmed where it overlaps a neighbouring Beat's fence.
+    const [distanceLimitInput, setDistanceLimitInput] = useState(String(OUTLIER_DISTANCE_METERS));
+    // "take": nearby houses inside a neighbour's fence move to this Beat and the neighbour's
+    // fence is resized around the new one; "trim": they stay out. Fences never overlap.
+    const [neighborMode, setNeighborMode] = useState("take");
+    const distanceLimitMeters = clampDistanceLimit(distanceLimitInput);
 
     const beatFiles = useMemo(() => beatData?.beats || [], [beatData]);
     const employees = useMemo(() => beatFiles.map((beat, index) => ({
@@ -1103,13 +1144,51 @@ export default function BeatHouseRoutePlanner({
                 id: item.id,
                 name: item.beatName,
                 polygons: geofenceOverrides[item.id] || item.fencePolygons || [],
+                houses: item.houses || [],
             })),
         [beat?.id, beatFiles, geofenceOverrides],
     );
-    const employeeGeofenceCandidate = useMemo(
-        () => createEmployeeGeofence(historicallyCollectedHouses, neighboringGeofences),
-        [historicallyCollectedHouses, neighboringGeofences],
+    const fenceSourceReady = fenceSource?.beatId === beat?.id && fenceSource?.status === "ready";
+    const fenceHouses = useMemo(
+        () => fenceSourceReady ? fenceSource.houses : historicallyCollectedHouses,
+        [fenceSource, fenceSourceReady, historicallyCollectedHouses],
     );
+    // Houses of the selected Beat whose House ID is also in another Beat's list in this ULB.
+    const sharedHouseListings = useMemo(() => {
+        if (!beat) return [];
+        const listings = findHousesInSeveralBeats(beatFiles);
+        return [...new Set((beat.houses || []).map((house) => String(house.house_id)))]
+            .filter((houseId) => listings.has(houseId))
+            .map((houseId) => ({
+                houseId,
+                others: listings.get(houseId).filter((owner) => owner.beatId !== beat.id).map((owner) => owner.label),
+            }));
+    }, [beat, beatFiles]);
+    const existingBeatFence = useMemo(
+        () => (beat ? geofenceOverrides[beat.id] || beat.fencePolygons || [] : []),
+        [beat, geofenceOverrides],
+    );
+    const employeeGeofenceCandidate = useMemo(
+        () => createEmployeeGeofence(fenceHouses, neighboringGeofences, {
+            distanceLimitMeters,
+            existingFencePolygons: existingBeatFence,
+            neighborMode,
+        }),
+        [distanceLimitMeters, existingBeatFence, fenceHouses, neighborMode, neighboringGeofences],
+    );
+    // An open preview follows the settings, so changing the distance or trimming redraws it.
+    React.useEffect(() => {
+        // A candidate with no boundary left (for example, a very small limit) closes the preview.
+        setGeofencePreview((current) => {
+            if (!current || current.beatId !== beat?.id) return current;
+            return employeeGeofenceCandidate.polygons.length
+                ? {beatId: current.beatId, ...employeeGeofenceCandidate}
+                : null;
+        });
+    }, [beat?.id, employeeGeofenceCandidate]);
+    const outlierRuleText = (candidate) => candidate.outlierRule === "existingBoundary"
+        ? `more than ${candidate.distanceLimitMeters} m outside the existing Beat boundary`
+        : `more than ${candidate.distanceLimitMeters} m from every other house with collection history`;
     const mappedHistoricalHouseCount = employeeGeofenceCandidate.includedHouseIds.length;
     const coveredHistoricalHouseCount = Math.max(
         0,
@@ -1230,9 +1309,50 @@ export default function BeatHouseRoutePlanner({
         setSelectedRouteId("");
     };
 
-    const handleRebuildGeofence = () => {
+    // Loads the employee's 30-day and live reports, then shows the preview built from both.
+    const handleRebuildGeofence = async () => {
         if (!beat) return;
-        const candidate = employeeGeofenceCandidate;
+        const requestId = fenceRequestRef.current + 1;
+        fenceRequestRef.current = requestId;
+        const employee = {id: beat.assignedEmployee.id, name: beat.assignedEmployee.name};
+        setGeofencePreview(null);
+        setGeofenceError("");
+        setFenceSource({beatId: beat.id, status: "loading"});
+        const collectedFrom = (report) => {
+            const reportBeat = report?.beats?.[0];
+            return reportBeat
+                ? getHistoricallyCollectedHouses(reportBeat.houses, reportBeat.routes, reportBeat.assignedEmployee)
+                : [];
+        };
+        const [monthResult, liveResult] = ulbId
+            ? await Promise.allSettled([
+                fetchEmployeeReport(ulbId, employee),
+                fetchEmployeeReport(ulbId, employee, {live: true}),
+            ])
+            : [{status: "rejected"}, {status: "rejected"}];
+        if (fenceRequestRef.current !== requestId) return;
+        const monthBeat = monthResult.status === "fulfilled" ? monthResult.value?.beats?.[0] : null;
+        const monthHouses = monthResult.status === "fulfilled" ? collectedFrom(monthResult.value) : [];
+        const liveHouses = liveResult.status === "fulfilled" ? collectedFrom(liveResult.value) : [];
+        // The loaded page data is added too, so nothing already shown is dropped.
+        const houses = mergeCollectedHouses(monthHouses, liveHouses, historicallyCollectedHouses);
+        const source = {
+            beatId: beat.id,
+            status: "ready",
+            houses,
+            monthLoaded: Boolean(monthBeat),
+            liveLoaded: liveResult.status === "fulfilled",
+            fromDate: monthBeat?.fromDate || "",
+            toDate: monthBeat?.toDate || "",
+            monthCount: monthHouses.length,
+            liveCount: liveHouses.length,
+        };
+        setFenceSource(source);
+        const candidate = createEmployeeGeofence(houses, neighboringGeofences, {
+            distanceLimitMeters,
+            existingFencePolygons: existingBeatFence,
+            neighborMode,
+        });
         if (candidate.geometryError) {
             setGeofencePreview(null);
             setGeofenceError(candidate.geometryError);
@@ -1243,7 +1363,7 @@ export default function BeatHouseRoutePlanner({
             setGeofenceError(
                 candidate.overlappingNeighborIds.length
                     ? "The neighboring fences cover the entire candidate area. The existing fence was retained."
-                    : historicallyCollectedHouses.length
+                    : houses.length
                         ? "Historical collection records exist, but none have valid map coordinates."
                         : "No collection history was found for this Beat."
             );
@@ -1257,24 +1377,32 @@ export default function BeatHouseRoutePlanner({
         setGeofenceError("");
     };
 
-    const handleKeepGeofence = () => {
+    // keepAnyway: the user accepts that the listed houses stay outside the new fence.
+    const handleKeepGeofence = (keepAnyway = false) => {
         if (!beat || !geofencePreview || geofencePreview.beatId !== beat.id) return;
-        if (geofencePreview.geometryError || geofencePreview.outsideHouseIds.length) {
+        if (geofencePreview.geometryError || (geofencePreview.outsideHouseIds.length && !keepAnyway)) {
             setGeofenceError(
                 geofencePreview.geometryError ||
                 `${geofencePreview.outsideHouseIds.length} historically collected house(s) fall outside the candidate after aligning it to neighboring fences. The existing fence was retained. Check whether those houses belong inside another Beat's boundary.`
             );
             return;
         }
+        const neighborUpdates = geofencePreview.neighborUpdates || [];
         setGeofenceOverrides((current) => ({
             ...current,
+            ...Object.fromEntries(neighborUpdates.map((update) => [update.id, update.polygons])),
             [beat.id]: geofencePreview.polygons,
         }));
         setGeofencePreview(null);
         setGeofenceError("");
         clearResults();
+        const leftOut = geofencePreview.outsideHouseIds.length + geofencePreview.outlierHouseIds.length;
         setNotice(
-            `The new geofence for ${beat.assignedEmployee.name} is active for this session. API report data was not changed.`
+            `The new geofence for ${beat.assignedEmployee.name} is active for this session. API report data was not changed.` +
+            (leftOut ? ` ${leftOut.toLocaleString()} collected house(s) are outside it.` : "") +
+            (neighborUpdates.length
+                ? ` Fence reduced for ${neighborUpdates.map((update) => update.name).join(", ")} so the fences do not overlap.`
+                : "")
         );
     };
 
@@ -1557,19 +1685,58 @@ export default function BeatHouseRoutePlanner({
                                 <div>
                                     <h2 className="section-heading font-semibold text-slate-900"><SectionIcon icon={Hexagon} tone="violet"/>Rebuild Beat Geofence</h2>
                                     <p className="mt-1 text-sm text-slate-600">
-                                        Candidate uses every house with recorded collection history in this Beat, regardless of scanner.
+                                        Candidate uses every house collected at least once in the last 30 days or today, regardless of scanner. Rebuild loads the employee&apos;s 30-day report and today&apos;s live report.
                                         {" "}{mappedHistoricalHouseCount.toLocaleString()} mappable;{" "}
                                         {employeeGeofenceCandidate.missingHouseIds.length.toLocaleString()} missing coordinates.
                                     </p>
                                     <p className="mt-1 text-xs text-slate-500">
-                                        The candidate is trimmed to neighboring Beat boundaries so its edges align without overlapping their fences.
+                                        {neighborMode === "take"
+                                            ? "Collected houses inside a neighboring Beat's fence (within the distance limit) move to this Beat, and that Beat's fence is reduced so the fences do not overlap."
+                                            : neighborMode === "trim"
+                                                ? "The candidate is trimmed to neighboring Beat boundaries so its edges align without overlapping their fences."
+                                                : "The candidate is not trimmed, so it may overlap neighboring Beat fences."}
+                                    </p>
+                                    <div className="mt-2 flex flex-wrap items-center gap-x-5 gap-y-2 text-sm text-slate-700">
+                                        <label className="inline-flex items-center gap-2">
+                                            <span className="font-medium">Distance limit</span>
+                                            <input
+                                                type="number"
+                                                inputMode="numeric"
+                                                min={MIN_DISTANCE_LIMIT_METERS}
+                                                max={MAX_DISTANCE_LIMIT_METERS}
+                                                step={10}
+                                                value={distanceLimitInput}
+                                                onChange={(event) => setDistanceLimitInput(event.target.value)}
+                                                onBlur={() => setDistanceLimitInput(String(distanceLimitMeters))}
+                                                className="w-24 rounded border border-slate-300 bg-white px-2 py-1 tabular-nums"
+                                                aria-describedby="distance-limit-help"
+                                            />
+                                            <span>m</span>
+                                        </label>
+                                        <label className="inline-flex items-center gap-2">
+                                            <span className="font-medium">Houses in a neighboring Beat</span>
+                                            <select
+                                                value={neighborMode}
+                                                onChange={(event) => setNeighborMode(event.target.value)}
+                                                className="rounded border border-slate-300 bg-white px-2 py-1"
+                                            >
+                                                <option value="take">Include them and resize the neighboring Beat</option>
+                                                <option value="trim">Leave them out</option>
+                                            </select>
+                                        </label>
+                                    </div>
+                                    <p id="distance-limit-help" className="mt-1 text-xs text-slate-500">
+                                        {existingBeatFence.length
+                                            ? `Collected houses more than ${distanceLimitMeters} m outside this Beat's existing boundary are left out of the new fence.`
+                                            : `This Beat has no usable boundary, so houses more than ${distanceLimitMeters} m from every other collected house are left out.`}
+                                        {` Allowed: ${MIN_DISTANCE_LIMIT_METERS}–${MAX_DISTANCE_LIMIT_METERS} m.`}
                                     </p>
                                     <p className="mt-1 text-xs text-slate-600">
                                         Coverage check: {historicalHouseCoveragePercent == null
                                             ? "No mappable historical locations to verify."
                                             : `${coveredHistoricalHouseCount.toLocaleString()} of ${mappedHistoricalHouseCount.toLocaleString()} mapped historical locations inside (${historicalHouseCoveragePercent}%).`}
                                         {employeeGeofenceCandidate.outlierHouseIds.length > 0 &&
-                                            ` ${employeeGeofenceCandidate.outlierHouseIds.length.toLocaleString()} isolated location(s) excluded.`}
+                                            ` ${employeeGeofenceCandidate.outlierHouseIds.length.toLocaleString()} location(s) beyond the ${distanceLimitMeters} m limit left out.`}
                                         {" "}This checks recorded point coverage, not the original GPS coordinate accuracy.
                                     </p>
                                 </div>
@@ -1577,10 +1744,12 @@ export default function BeatHouseRoutePlanner({
                                     <button
                                         type="button"
                                         onClick={handleRebuildGeofence}
-                                        disabled={!historicallyCollectedHouses.length}
+                                        disabled={fenceSource?.beatId === beat.id && fenceSource.status === "loading"}
                                         className="rounded-lg border border-violet-300 bg-white px-4 py-2 text-sm font-semibold text-violet-900 hover:bg-violet-50 disabled:cursor-not-allowed disabled:opacity-50"
                                     >
-                                        Rebuild Beat Geofence
+                                        {fenceSource?.beatId === beat.id && fenceSource.status === "loading"
+                                            ? "Loading 30-day and live data…"
+                                            : "Rebuild Beat Geofence"}
                                     </button>
                                 ) : null}
                             </div>
@@ -1596,13 +1765,28 @@ export default function BeatHouseRoutePlanner({
                                     </ul>
                                 </details>
                             )}
+                            {sharedHouseListings.length > 0 && (
+                                <details className="mt-3 text-sm text-rose-900">
+                                    <summary className="cursor-pointer font-medium">
+                                        Houses also listed in another Beat ({sharedHouseListings.length.toLocaleString()})
+                                    </summary>
+                                    <p className="mt-1 text-xs text-rose-800">
+                                        The API lists each of these House IDs in this Beat and in at least one other Beat of this ULB. A fence cannot decide who owns them; ask the API team to keep each house in one Beat.
+                                    </p>
+                                    <ul className="mt-2 max-h-40 list-inside list-disc overflow-y-auto rounded border border-rose-200 bg-white p-2">
+                                        {sharedHouseListings.map((item) => (
+                                            <li key={item.houseId}>{item.houseId} · also in {item.others.join(", ")}</li>
+                                        ))}
+                                    </ul>
+                                </details>
+                            )}
                             {employeeGeofenceCandidate.outlierHouseIds.length > 0 && (
                                 <details className="mt-3 text-sm text-amber-900">
                                     <summary className="cursor-pointer font-medium">
-                                        Isolated locations excluded from the boundary ({employeeGeofenceCandidate.outlierHouseIds.length})
+                                        Houses left out as too far away ({employeeGeofenceCandidate.outlierHouseIds.length})
                                     </summary>
                                     <p className="mt-1 text-xs text-amber-800">
-                                        Each of these houses is more than {OUTLIER_DISTANCE_METERS} m from every other house with collection history, so its coordinate is likely wrong. Review them before relying on the new boundary.
+                                        Each of these houses is {outlierRuleText(employeeGeofenceCandidate)}. Raise the distance limit to include them, or check whether their coordinates are wrong.
                                     </p>
                                     <ul className="mt-2 max-h-32 list-inside list-disc overflow-y-auto rounded border border-amber-200 bg-white p-2">
                                         {employeeGeofenceCandidate.outlierHouseIds.map((houseId, index) => (
@@ -1613,23 +1797,69 @@ export default function BeatHouseRoutePlanner({
                             )}
                             {geofencePreview?.beatId === beat.id && (
                                 <div role="status" className="mt-3 rounded border border-violet-200 bg-white p-3 text-sm">
+                                    {fenceSourceReady && (
+                                        <p className={`mb-1 text-xs ${fenceSource.monthLoaded ? "text-slate-600" : "text-amber-800"}`}>
+                                            {fenceSource.monthLoaded
+                                                ? `Built from ${fenceSource.houses.length.toLocaleString()} collected houses: ${fenceSource.monthCount.toLocaleString()} in the 30-day report${fenceSource.fromDate ? ` (${fenceSource.fromDate} to ${fenceSource.toDate})` : ""}`
+                                                : `The 30-day report could not be loaded, so the fence uses the ${fenceSource.houses.length.toLocaleString()} collected houses already on this page`}
+                                            {fenceSource.liveLoaded
+                                                ? `, ${fenceSource.liveCount.toLocaleString()} collected today in the live report.`
+                                                : "; today's live report could not be loaded."}
+                                        </p>
+                                    )}
                                     <p className="font-medium text-slate-900">
                                         Preview: {Math.max(0, geofencePreview.includedHouseIds.length - geofencePreview.outsideHouseIds.length).toLocaleString()} of {geofencePreview.includedHouseIds.length.toLocaleString()} mappable historical locations covered.
                                         {geofencePreview.missingHouseIds.length > 0 &&
                                             ` ${geofencePreview.missingHouseIds.length.toLocaleString()} historical houses lack coordinates.`}
                                         {geofencePreview.outlierHouseIds.length > 0 &&
-                                            ` ${geofencePreview.outlierHouseIds.length.toLocaleString()} isolated location(s) more than ${OUTLIER_DISTANCE_METERS} m from other houses were excluded.`}
+                                            ` ${geofencePreview.outlierHouseIds.length.toLocaleString()} location(s) ${outlierRuleText(geofencePreview)} were left out.`}
                                     </p>
                                     <p className={geofencePreview.outsideHouseIds.length ? "mt-1 text-red-700" : "mt-1 text-emerald-700"}>
                                         {geofencePreview.outsideHouseIds.length
-                                            ? `${geofencePreview.outsideHouseIds.length} mapped historical locations fall outside the boundary-aligned candidate. Keeping is disabled so recorded coverage is not silently lost.`
-                                            : "Every mappable historical location is inside the candidate, and neighboring fence overlaps have been removed."}
+                                            ? `${geofencePreview.outsideHouseIds.length} mapped historical locations fall inside neighboring Beat fences, so the trimmed candidate leaves them out. Choose "Move to this Beat" to take them, or keep the fence anyway.`
+                                            : geofencePreview.neighborMode === "take" && geofencePreview.neighborUpdates?.length
+                                                ? "Every mappable historical location is inside the candidate. The neighboring fences shown in orange will be reduced so nothing overlaps."
+                                                : geofencePreview.trimmedToNeighbors || geofencePreview.neighborMode === "take"
+                                                    ? "Every mappable historical location is inside the candidate, and neighboring fence overlaps have been removed."
+                                                    : "Every mappable historical location is inside the candidate. It may overlap neighboring Beat fences."}
                                     </p>
-                                    {geofencePreview.overlappingNeighborNames.length > 0 && (
+                                    {geofencePreview.overlappingNeighborNames.length > 0 && geofencePreview.neighborMode !== "take" && (
                                         <p className="mt-1 text-xs text-slate-600">
-                                            Shared edges aligned with: {geofencePreview.overlappingNeighborNames.join(", ")}.
+                                            {geofencePreview.neighborMode === "overlap" ? "Overlaps" : "Shared edges aligned with"}: {geofencePreview.overlappingNeighborNames.join(", ")}.
                                         </p>
                                     )}
+                                    {(geofencePreview.builtAreaCount > 1 || geofencePreview.keptAreaCount > 0) && (
+                                        <p className="mt-1 text-xs text-slate-600">
+                                            {geofencePreview.builtAreaCount.toLocaleString()} area(s) rebuilt around collected houses
+                                            {geofencePreview.keptAreaCount > 0 &&
+                                                `; ${geofencePreview.keptAreaCount.toLocaleString()} existing area(s) with no collected houses kept unchanged (for example an office area shared by every Beat)`}.
+                                        </p>
+                                    )}
+                                    {(geofencePreview.contestedNeighbors || []).map((item) => (
+                                        <p key={`contested-${item.neighborId}`} className="mt-1 text-xs text-amber-800">
+                                            Not taken from {item.neighborName}: {item.collectedHouses.toLocaleString()} collected house(s) of this Beat lie inside its fence, but
+                                            {item.reasons.includes("mostly")
+                                                ? ` ${item.neighborHouses.toLocaleString()} of its own houses are there too, so that area stays with ${item.neighborName}.`
+                                                : " taking them would leave a hole in its fence."}
+                                            {" "}They are listed as outside the new fence.
+                                        </p>
+                                    ))}
+                                    {(geofencePreview.takenHouses || []).map((taken) => (
+                                        <details key={taken.neighborId} className="mt-2 text-sm text-orange-900">
+                                            <summary className="cursor-pointer font-medium">
+                                                From {taken.neighborName}: {taken.collectedHouseIds.length.toLocaleString()} collected house(s) move to this Beat
+                                                {taken.neighborHouseIds.length > 0 && `; ${taken.neighborHouseIds.length.toLocaleString()} of its listed houses are inside the new fence`}
+                                            </summary>
+                                            <p className="mt-1 text-xs text-orange-800">
+                                                {taken.neighborName}&apos;s fence is reduced by the area the new fence covers. Only the fences change for this session; house assignments in the API are not changed.
+                                            </p>
+                                            <ul className="mt-2 max-h-32 list-inside list-disc overflow-y-auto rounded border border-orange-200 bg-orange-50 p-2">
+                                                {[...new Set([...taken.collectedHouseIds, ...taken.neighborHouseIds])].map((houseId, index) => (
+                                                    <li key={`${houseId}-${index}`}>{houseId}</li>
+                                                ))}
+                                            </ul>
+                                        </details>
+                                    ))}
                                     {geofencePreview.outsideHouseIds.length > 0 && (
                                         <details className="mt-2 text-sm text-red-800">
                                             <summary className="cursor-pointer font-medium">
@@ -1646,14 +1876,24 @@ export default function BeatHouseRoutePlanner({
                                         Dashed violet outlines show the candidate boundary; the existing fences remain visible until you keep it.
                                     </p>
                                     <div className="mt-3 flex flex-wrap gap-2">
-                                        <button
-                                            type="button"
-                                            onClick={handleKeepGeofence}
-                                            disabled={Boolean(geofencePreview.geometryError) || geofencePreview.outsideHouseIds.length > 0}
-                                            className="rounded bg-emerald-700 px-3 py-2 text-sm font-semibold text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-50"
-                                        >
-                                            Keep new fence
-                                        </button>
+                                        {geofencePreview.outsideHouseIds.length > 0 && !geofencePreview.geometryError ? (
+                                            <button
+                                                type="button"
+                                                onClick={() => handleKeepGeofence(true)}
+                                                className="rounded bg-amber-600 px-3 py-2 text-sm font-semibold text-white hover:bg-amber-700"
+                                            >
+                                                Keep anyway ({geofencePreview.outsideHouseIds.length.toLocaleString()} houses outside)
+                                            </button>
+                                        ) : (
+                                            <button
+                                                type="button"
+                                                onClick={() => handleKeepGeofence()}
+                                                disabled={Boolean(geofencePreview.geometryError)}
+                                                className="rounded bg-emerald-700 px-3 py-2 text-sm font-semibold text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-50"
+                                            >
+                                                Keep new fence
+                                            </button>
+                                        )}
                                         <button
                                             type="button"
                                             onClick={() => {
